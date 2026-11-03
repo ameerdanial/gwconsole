@@ -63,6 +63,12 @@ class CloudflaredNode(SSHTarget):
 
 
 @dataclass
+class ServerNode(SSHTarget):
+    """Any other Linux host (web, database, cache, game server): health and watched services only."""
+    site: str = ""
+
+
+@dataclass
 class CFAccount:
     name: str
     account_id: str
@@ -88,6 +94,7 @@ class Settings:
     dashboard_url: str = ""
     haproxy_nodes: list[HAProxyNode] = field(default_factory=list)
     cloudflared_nodes: list[CloudflaredNode] = field(default_factory=list)
+    server_nodes: list[ServerNode] = field(default_factory=list)
     cf_accounts: dict[str, CFAccount] = field(default_factory=dict)
 
     # lookups -------------------------------------------------------------
@@ -102,6 +109,16 @@ class Settings:
             if n.name == name:
                 return n
         raise KeyError(f"unknown cloudflared node {name!r}")
+
+    def all_nodes(self) -> list:
+        """Every SSH node, whatever its kind (HAProxy, cloudflared, other servers)."""
+        return [*self.haproxy_nodes, *self.cloudflared_nodes, *self.server_nodes]
+
+    def node(self, name: str):
+        for n in self.all_nodes():
+            if n.name == name:
+                return n
+        raise KeyError(f"unknown node {name!r}")
 
 
 
