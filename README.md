@@ -2,11 +2,12 @@
 
 One web UI to watch **and** manage the HAProxy VM and the cloudflared LXC.
 It runs in its own small LXC and talks to both nodes over SSH (key auth, no agents),
-plus the Cloudflare API for edge health and DNS routes.
+plus the Cloudflare API for edge health and DNS routes. A background checker records
+every alert and can message you on Telegram or Discord.
 
 ```
-            browser ──HTTP:8088──▶  gwconsole LXC
-                                     │  SSH (key, from= locked)
+            browser ──HTTP:8088──▶  gwconsole LXC  ──▶ Telegram / Discord (alerts)
+                                     │  SSH (key, from= locked, host key pinned)
                     ┌────────────────┼──────────────────┐
                     ▼                                   ▼
              HAProxy VM                          cloudflared-lxc
@@ -15,66 +16,74 @@ plus the Cloudflare API for edge health and DNS routes.
                                      └── HTTPS ──▶ api.cloudflare.com (tunnels, DNS)
 ```
 
+![Overview](docs/overview.png)
+
 ## What it does
 
 | Page | See | Do |
 |---|---|---|
-| **Overview** | KPIs, alert list (backend/server down, tunnel down/degraded, DNS mismatches, node unreachable), node + tunnel cards | — |
-| **HAProxy** | `show info` + `show stat`: frontends, backends, every server with check status, sessions, rates, bytes, 2xx/4xx/5xx | Server **ready / drain / maint** (runtime), **reload** (config-checked first), restart, service & access logs |
-| **Tunnels** | Every cloudflared service on the node (auto-discovered): local state, Cloudflare edge status, edge connections (colos), ingress rules, DNS status per hostname, orphan DNS records, and tunnels in your accounts that run nowhere you manage | **New tunnel**, **delete tunnel**, **add / remove hostname**, start / stop / restart, logs, test which ingress rule matches a URL, create/fix DNS route |
-| **Config** | `haproxy.cfg` and every tunnel's `config.yml` in an editor | Validate → review diff → apply, restore from backups |
+| **Overview** | KPIs, active alerts, node and tunnel cards | — |
+| **HAProxy** | `show info` + `show stat`: frontends, backends, every server with check status, sessions, rates, bytes, 2xx/4xx/5xx | Server **ready / drain / maint**, **reload** (config-checked first), restart, logs, **Edit config** |
+| **Tunnels** | Every cloudflared service on the node (auto-discovered): local state, Cloudflare edge status, connections, ingress rules, DNS status per hostname, orphan DNS records, tunnels in your accounts that run nowhere you manage | **New tunnel**, **delete tunnel**, **add / remove hostname**, start / stop / restart, logs, rule tester, create/fix DNS route, **Edit config** |
+| **Alerts** | Active and past alerts: what, when it started, how long it lasted, who acknowledged it | Acknowledge, mute an alert or a whole node, export CSV, check now |
 | **Activity** | Audit log of every change (who, what, result, output) | — |
+| **Settings** | Users, sessions, Cloudflare accounts, nodes, notifications, general (superadmin only) | Everything that used to be in config files |
 
-### Safe apply (both HAProxy and cloudflared)
+### Config editor (side panel)
+**Edit config** on the HAProxy or Tunnels page slides the editor in over the live stats.
 
+- **Editor tab**: validate → review the diff → apply.
+- **History tab**: every backup, with who made the change that followed it and +/− line counts. Pick one to see what restoring it would change, then **Restore this version** (it goes through the same safe apply).
+
+![Editor](docs/editor.png)
+
+### Safe apply (HAProxy and cloudflared)
 1. Upload to a temp file on the node and validate it there (`haproxy -c -f` / `cloudflared tunnel ingress validate`). Invalid → nothing changes.
 2. Refuse if the file changed on the server since you opened it (someone edited over SSH).
-3. Back up the current file to `gwc-backups/` (last 20 kept).
+3. Back up the current file to `gwc-backups/` (last 20 kept, configurable).
 4. Write in place, then `systemctl reload haproxy` or `systemctl restart cloudflared-<name>`.
 5. Wait, then check the service is still `active`. If reload or the check fails, it **restores the backup and reloads again automatically**.
 
+Every change keeps running to the end even if you close the browser tab mid-way.
+Server ready/drain/maint goes through the admin socket, so it only lasts until the next HAProxy restart.
+
+### Alerts and notifications
+A background checker runs every 30 s (configurable), even with no browser open.
+
+- **One alert per problem**: an alert opens when a problem appears and resolves after it has been gone for two checks in a row. If it returns within 10 minutes, the same alert reopens (shown as *flapping*) instead of creating noise.
+- **No false recoveries**: if a node is unreachable or the Cloudflare API is failing, alerts that depend on it stay open instead of resolving.
+- **Acknowledge** marks "I'm on it". **Mute** an alert, or a whole node during maintenance (30 min – 7 days): it is still recorded but sends no messages.
+- **Telegram / Discord** (Settings → Notifications): only new, escalated and resolved alerts are sent, combined into one message per check. Choose the minimum severity and whether to send recoveries for each channel.
+
+![Alerts](docs/alerts.png)
+
+### Users and roles
+| | Viewer | Operator | Superadmin |
+|---|---|---|---|
+| See all pages, logs, alerts, configs (read-only) | ✔ | ✔ | ✔ |
+| Acknowledge / mute alerts | | ✔ | ✔ |
+| Server state, reload/restart, edit configs, tunnels, hostnames, DNS routes | | ✔ | ✔ |
+| Users, Cloudflare accounts, nodes, notifications, settings | | | ✔ |
+
+New users and password resets get a temporary password that must be changed at first sign-in. Superadmins can see every signed-in session and revoke it. The last active superadmin can't be demoted, disabled or deleted.
+
 ### Managing tunnels
+**New tunnel** (button on each cloudflared node): name, Cloudflare account, and optionally a first hostname and origin. The dashboard creates the tunnel through the Cloudflare API, writes the credentials (600) and `config.yml`, installs `cloudflared-<name>.service`, enables it, checks it is active and creates the DNS record. If anything fails, all of it is undone.
 
-**New tunnel** (button on each cloudflared node): give it a name, pick the Cloudflare account, and optionally a first hostname and origin service. The dashboard then:
-1. Creates a locally managed tunnel through the Cloudflare API.
-2. Writes `<tunnel_base_dir>/<name>/<tunnel-id>.json` (credentials, chmod 600) and `config.yml` on the node.
-3. Runs `cloudflared ingress validate`, installs `cloudflared-<name>.service`, and runs `systemctl enable --now`.
-4. Checks the unit is active, then creates the proxied CNAME.
+**+ Hostname / Remove** edits the ingress list (keeping your comments and indentation) through the safe-apply pipeline, and can create or delete the DNS record. It never repoints a record that belongs to another tunnel; that needs the explicit **Fix route** button.
 
-If anything fails at step 2–4, the unit and directory are removed and the tunnel is deleted in Cloudflare again.
+**Delete** (type the name to confirm) stops the unit and moves its files into `<tunnel_base_dir>/.gwc-archive/<name>-<timestamp>/` (nothing erased), then optionally deletes the DNS records and the tunnel in Cloudflare.
 
-**+ Hostname / Remove** (on each tunnel):
-- Edits the ingress list in `config.yml` and keeps your comments and indentation. A new rule goes before the catch-all.
-- Goes through the same safe-apply pipeline (validate, backup, restart, rollback).
-- Can create the DNS record when adding, or delete it when removing.
-- Never repoints a DNS record that already belongs to another tunnel. That needs the explicit **Fix route** button.
-
-**Delete** (type the name to confirm):
-1. Stops and disables the unit.
-2. Moves the config, credentials, backups and the unit file into `<tunnel_base_dir>/.gwc-archive/<name>-<timestamp>/`. Nothing is erased on the node. A shared template such as `cloudflared@.service` is left alone.
-3. Optionally deletes the DNS records pointing at the tunnel, then the tunnel in Cloudflare.
-
-To undo a delete, move the files back from the archive and run `systemctl enable --now` on the unit.
-
-**In Cloudflare, not on a managed node** lists tunnels in your accounts that no managed node runs, such as leftovers or tunnels on other servers.
-- Ones with no live connections can be deleted, along with their DNS records.
-- Ones with live connections are labelled *running elsewhere* and can't be deleted from here.
-
-**Token-run tunnels** (`cloudflared tunnel run --token …`) are detected and can be started, stopped, restarted or deleted. Their hostnames live in the Zero Trust dashboard, so the hostname editor is hidden for them.
-
-Every change in this section keeps running to the end even if you close the browser tab mid-way. The remote script ignores hangups, and the server finishes the job and writes the audit entry.
-
-Server ready/drain/maint goes through the admin socket, so it only lasts until the next restart. To make it permanent, change the config.
+**Token-run tunnels** (`cloudflared tunnel run --token …`) are detected and can be started, stopped or deleted; their hostnames live in the Zero Trust dashboard.
 
 ## Install
 
 ### 1. Dashboard LXC
-A small Debian 12/13 or Ubuntu LXC (1 vCPU, 512 MB is plenty). Put it on the mgmt VLAN, the same network that can reach both gateways on SSH.
+A small Debian 12/13 or Ubuntu LXC (1 vCPU, 512 MB is plenty) on the management network that can reach both gateways over SSH.
 
-The repo is private, so the LXC pulls it with a read-only **deploy key**. That key can't push and can't see your other repos.
+The repo is private, so the LXC pulls it with a read-only **deploy key** (it can't push and can't see your other repos):
 
 ```bash
-# on the LXC
 apt update && apt install -y git
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/gwconsole_deploy -C "deploy@$(hostname)"
 cat ~/.ssh/gwconsole_deploy.pub
@@ -86,44 +95,27 @@ Host github-gwconsole
   IdentityFile ~/.ssh/gwconsole_deploy
   IdentitiesOnly yes
 EOF
-git clone github-gwconsole:<your-github-user>/gwconsole.git /root/gwconsole
-cd /root/gwconsole && git checkout v1.1.0      # deploy a tagged release
+git clone github-gwconsole:ameerdanial/gwconsole.git /root/gwconsole
+cd /root/gwconsole && git checkout v1.2.0      # deploy a tagged release
 bash install.sh
-gwconsole hashpw            # copy the scrypt$... output
-nano /etc/gwconsole/config.yaml   # paste hash under users:, set node IPs, tunnels, CF account IDs
-nano /etc/gwconsole/env           # CF API tokens
-gwconsole pubkey            # copy this for step 2
+gwconsole create-admin ameer                   # your superadmin login
+systemctl start gwconsole                      # open http://<lxc-ip>:8088
 ```
 
-### 2. On each managed node (HAProxy VM and cloudflared-lxc)
-Copy `prepare-node.sh` over, then:
+### 2. Add your nodes (in the browser)
+1. **Settings → Nodes** shows the exact `prepare-node.sh` command with this dashboard's SSH key. Run it once on each node as root (add `--haproxy` on the HAProxy VM). It allows the key from this dashboard only, installs `socat`, and checks the HAProxy admin socket.
+2. **+ Add node** → enter the IP → **Scan host key** → compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node → tick the box → **Test connection** → **Save**.
 
-```bash
-# HAProxy VM   (scp /root/gwconsole/prepare-node.sh over from the dashboard LXC)
-bash prepare-node.sh --key "<output of gwconsole pubkey>" --from <dashboard-ip> --haproxy
-# cloudflared-lxc
-bash prepare-node.sh --key "<output of gwconsole pubkey>" --from <dashboard-ip>
-```
-
-This adds the key to `/root/.ssh/authorized_keys` and only accepts it from the dashboard IP.
-On HAProxy it also installs `socat` and checks the admin socket. If the script says it is missing, add this under `global` in `haproxy.cfg`:
-
+If HAProxy has no admin socket, add this under `global` in `haproxy.cfg` (you can do it in the dashboard's editor):
 ```
 stats socket /run/haproxy/admin.sock mode 660 level admin
 ```
-then `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy`.
 
-### 3. Trust host keys, test, start
-```bash
-gwconsole trust <haproxy-ip>
-gwconsole trust <cloudflared-ip>
-gwconsole check             # should print [ok] for every node, tunnel and CF account
-systemctl start gwconsole
-```
-Open `http://<dashboard-ip>:8088`.
+### 3. Cloudflare accounts
+**Settings → Cloudflare → + Add account**: a name, the Account ID and an API token. **Test before saving** shows which permissions the token has.
 
-### Cloudflare API token
-Make one per Cloudflare account under **My Profile → API Tokens → Create Custom Token**:
+- **Account ID**: dash.cloudflare.com → click a domain → right-hand column, **API** box → **Account ID** (also the long code in the address bar).
+- **API token**: Profile → API Tokens → Create Custom Token:
 
 | Permission | Level |
 |---|---|
@@ -131,72 +123,86 @@ Make one per Cloudflare account under **My Profile → API Tokens → Create Cus
 | Zone · Zone | Read |
 | Zone · DNS | **Edit** (Read if you never create/fix/delete routes) |
 
-Account ID is on the zone overview page (right sidebar). Put the token in `/etc/gwconsole/env`, e.g. `CF_TOKEN_MAIN=...`, then `gwconsole restart`.
+Tunnels are matched to their account automatically by the `tunnel:` ID in each `config.yml`.
 
-You don't list tunnels in `config.yaml`. They are discovered from the systemd units on the node, and each one is matched to its account by the `tunnel:` line in its `config.yml` (UUID or name). For token-run tunnels, the ID inside the token is used.
+### 4. Notifications (optional)
+**Settings → Notifications**:
+- **Telegram**: create a bot with @BotFather (bot token), message the bot once, get your chat ID from @userinfobot (groups: add @RawDataBot; the ID starts with `-100`).
+- **Discord**: channel → Edit Channel → Integrations → Webhooks → New Webhook → Copy URL.
+
+Use **Send test**, then set **Settings → General → Dashboard URL** so each message links back to the Alerts page.
+
+## Upgrading
+
+```bash
+cd /root/gwconsole
+git fetch --tags --force               # --force is needed once: the v1.1.0 tag was recreated in 1.2.0
+git tag --sort=-v:refname | head       # available releases
+git checkout v1.2.0 && bash install.sh
+```
+`install.sh` stops the service, backs up `/etc/gwconsole` and the database to `/var/backups/gwconsole/` (last 10 kept), upgrades and starts it again. Read `CHANGELOG.md` before upgrading.
+
+**From 1.1 to 1.2**: nothing to do by hand. On first start, the users, nodes and Cloudflare accounts in your old `config.yaml` (and tokens from `/etc/gwconsole/env`) are imported into the database once. You sign in with the same password. From then on, manage them in Settings; the old sections in `config.yaml` are ignored but left in place.
+
+**Rolling back**: `git checkout v1.1.0 && bash install.sh` works, because 1.1 still reads `config.yaml` (changes you made in the 1.2 Settings page are not carried back).
 
 ## Day-to-day
 
 ```bash
-gwconsole logs        # follow dashboard logs
-gwconsole restart     # after editing config.yaml / env
-gwconsole check       # connectivity test
-gwconsole version     # what's installed, e.g. "gwconsole 1.1.0 (v1.1.0)"
+gwconsole version               # installed version, e.g. "gwconsole 1.2.0 (v1.2.0)"
+gwconsole users                 # list users and roles
+gwconsole reset-password ameer  # locked out? set a new password (also re-enables the account)
+gwconsole create-admin <user>   # add another superadmin from the shell
+gwconsole check                 # test SSH to every node and every Cloudflare token
+gwconsole logs | restart
 ```
 
-### Upgrade / roll back
-```bash
-cd /root/gwconsole
-git fetch --tags
-git tag --sort=-v:refname | head        # available releases
-git checkout v1.2.0 && bash install.sh  # upgrade; config.yaml / env / keys are never touched
-git checkout v1.1.0 && bash install.sh  # roll back the same way
-```
-Check `CHANGELOG.md` before upgrading. Anything that needs a config change is listed there.
+Where things live:
 
-Backups on the nodes: `/etc/haproxy/gwc-backups/` and `/root/.cloudflared/<tunnel>/gwc-backups/`.
-Audit log: `/var/lib/gwconsole/audit.log` (JSON lines).
+| What | Where |
+|---|---|
+| Bootstrap config (listen, port, paths) | `/etc/gwconsole/config.yaml` |
+| Users, nodes, accounts, alerts, settings | `/var/lib/gwconsole/gwconsole.db` (SQLite) |
+| Key that encrypts tokens/webhooks in the DB | `/etc/gwconsole/secret.key`. **Back it up with the DB.** |
+| Dashboard SSH key | `/etc/gwconsole/id_ed25519` |
+| Audit log | `/var/lib/gwconsole/audit.log` |
+| Config backups on the nodes | `/etc/haproxy/gwc-backups/`, `/root/.cloudflared/<tunnel>/gwc-backups/` |
+| Upgrade backups | `/var/backups/gwconsole/` |
 
 ## Version control & releases
 
-- `main` holds the latest code. Every release is an annotated tag `vX.Y.Z` ([SemVer](https://semver.org/)), and `VERSION` holds the current number, which the UI and `gwconsole version` show.
+- `main` holds the latest code. Every release is an annotated tag `vX.Y.Z` ([SemVer](https://semver.org/)); `VERSION` holds the current number, shown in the UI and by `gwconsole version`.
+- Every commit touches one file and its message says what the file is for (`path: description`), so GitHub's file list doubles as documentation.
 - `CHANGELOG.md` records what changed in each release. Add notes under **Unreleased** as you work.
-- **CI** (GitHub Actions) runs on every push and PR: pytest on Python 3.11/3.12/3.13, a compile check, and parse checks for the shell scripts and the JS.
+- **CI** (GitHub Actions) runs on every push and PR: pytest on Python 3.11/3.12/3.13, a compile check, and syntax checks for the shell scripts and every JS file.
 - **Cutting a release:**
   ```bash
-  ./release.sh 1.2.0          # bumps VERSION, dates the changelog, commits, tags v1.2.0
-  git push && git push --tags # Actions builds gwconsole-v1.2.0.tar.gz and publishes a GitHub Release
+  ./release.sh 1.3.0           # dates the changelog, bumps VERSION, tags v1.3.0
+  git push && git push --tags  # Actions builds gwconsole-v1.3.0.tar.gz and publishes a GitHub Release
   ```
-- Run the tests locally: `pip install -r requirements-dev.txt && python -m pytest -q`.
-- For bigger changes, work on a branch (`git switch -c feature/x`), push it, open a PR, and let CI pass before merging.
-- Secrets never go in the repo. `config.yaml`, `env`, keys and `known_hosts` are git-ignored and live only in `/etc/gwconsole/` on the LXC.
+- Tests: `pip install -r requirements-dev.txt && python -m pytest -q`.
+- Secrets never go in the repo: `config.yaml`, `env`, keys, `secret.key` and `known_hosts` are git-ignored.
 
 ## Adding the DR site later
-Add another entry under `haproxy_nodes:` / `cloudflared_nodes:` with `site: DR`, run `prepare-node.sh` on it, `gwconsole trust <ip>`, `gwconsole restart`. Every page handles multiple nodes.
+Run `prepare-node.sh` on the DR nodes, then **Settings → Nodes → + Add node** with a site label like `DR`. Every page handles multiple nodes.
 
 ## Security notes
-- This tool can reload and restart your gateways. Only expose it on the mgmt VLAN or Tailscale, never through the tunnel or HAProxy publicly.
-- Login is scrypt-hashed. Sessions are in memory (a restart logs everyone out). 5 failed logins per IP lock that IP out for 5 minutes. Cookies are `HttpOnly` + `SameSite=Strict`, and every change also needs an `X-GWC` header.
-- The SSH key works only from the dashboard IP (`from=` in authorized_keys). Host keys are pinned in `/etc/gwconsole/known_hosts`.
-- Prefer non-root? Create a user on the node with `NOPASSWD` sudo, then set `user: <name>` and `sudo: true` for that node.
-- CF tokens live in `/etc/gwconsole/env` (root 600). systemd loads them, and the app runs as the unprivileged `gwconsole` user with a hardened unit.
+- This tool can reload and restart your gateways. Only expose it on the management VLAN or Tailscale, never publicly.
+- Passwords are scrypt-hashed. Sessions are stored hashed in the database and survive restarts. 5 failed logins per IP lock that IP out for 5 minutes. Cookies are `HttpOnly` + `SameSite=Strict`, and every change also needs an `X-GWC` header.
+- Roles are enforced on the server for every request; hiding buttons in the UI is only a convenience.
+- The SSH key works only from the dashboard IP (`from=` in authorized_keys). Nodes added in Settings pin their host key; a changed key blocks the connection.
+- Cloudflare tokens, the Telegram bot token and the Discord webhook are encrypted in the database with `secret.key` (root:gwconsole 640). The app runs as the unprivileged `gwconsole` user in a hardened systemd unit.
 
 ## Files
 ```
-app/            FastAPI backend + static UI (no build step, no CDN)
-  main.py       routes, alerts, auth guard
-  haproxy.py    admin socket stats, server state, service, config target
-  cloudflared.py  units, config.yml parsing, rule test, config target
-  configops.py  validate → backup → write → activate → check → rollback
-  cfapi.py      Cloudflare tunnels + DNS: report, route, create/delete tunnel
-  inventory.py  auto-discovery of cloudflared units on each node
-  tunnelops.py  create / delete (archive) tunnels, comment-preserving ingress edits
-  sshpool.py    persistent asyncssh connections
-tests/          pytest suite (ingress edits, discovery, stats parsing, config, auth)
-.github/        CI + release workflows
-VERSION         current version;  CHANGELOG.md  release notes;  release.sh  cut a release
-install.sh      installer / upgrader for the dashboard LXC
-prepare-node.sh one-time setup on each managed node
-config.example.yaml
-gwconsole.service
+app/                  FastAPI backend + web UI (no build step, no CDN) — see app/README.md
+tests/                pytest suite — see tests/README.md
+docs/                 screenshots used in this README
+.github/workflows/    CI and release automation
+install.sh            installer / upgrader for the dashboard LXC
+prepare-node.sh       one-time setup on each managed node
+release.sh            cut a release (changelog, VERSION, tag)
+config.example.yaml   bootstrap config template
+gwconsole.service     systemd unit
+VERSION · CHANGELOG.md · requirements.txt · requirements-dev.txt
 ```
