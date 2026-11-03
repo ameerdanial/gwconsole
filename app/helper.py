@@ -84,6 +84,23 @@ def update(**kw):
     return d
 
 
+def record(**kw):
+    """Append one upgrade/rollback to history.jsonl (shown under Update history; last 50 kept)."""
+    path = f"{STATE}/history.jsonl"
+    try:
+        with open(path) as f:
+            lines = f.readlines()[-49:]
+    except OSError:
+        lines = []
+    lines.append(json.dumps({"at": int(time.time()), **kw}) + "\n")
+    tmp = f"{path}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o640)
+    with os.fdopen(fd, "w") as f:
+        f.writelines(lines)
+    os.chown(tmp, 0, _gid())
+    os.replace(tmp, path)
+
+
 def log(msg: str, reset: bool = False):
     fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if reset else os.O_APPEND) | os.O_NOFOLLOW, 0o640)
     with os.fdopen(fd, "a") as f:
@@ -237,6 +254,7 @@ def upgrade(target: str, by: str):
         update(state="done", message=f"Updated {cur} → {target}", finished_at=int(time.time()), current=target,
                available=[a for a in st.get("available", []) if vt(a["version"]) > vt(target)],
                latest=st.get("latest", target))
+        record(kind="upgrade", **{"from": cur, "to": target}, by=by, result="done", seconds=int(time.time() - start))
         return
     log(f"!! {target} did not come up healthy — rolling back to {cur}")
     update(message="rolling back…")
@@ -254,6 +272,8 @@ def upgrade(target: str, by: str):
     rc2 = run_logged(["bash", f"{src}/install.sh", "--upgrade"])
     ok = rc2 == 0 and healthy(cur)
     log(f"== rollback {'finished: back on ' + cur if ok else 'FAILED — check: journalctl -u gwconsole'}")
+    record(kind="upgrade", **{"from": cur, "to": target}, by=by, result="rolled_back" if ok else "failed",
+           seconds=int(time.time() - start))
     update(state="rolled_back" if ok else "failed", finished_at=int(time.time()), current=current(),
            message=(f"{target} failed to start, so the dashboard went back to {cur}. Nothing was lost; see the log."
                     if ok else "The update and the rollback both failed — see the log and run: gwconsole status"))
