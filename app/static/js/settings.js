@@ -1,6 +1,7 @@
-/* Gateway Console web UI — Settings page (superadmin only): users and sessions, Cloudflare
- * accounts with token permission test, nodes with host-key confirmation and SSH test,
- * Telegram/Discord notifications, and general settings. */
+/* Gateway Console web UI — Settings page (superadmin only), in sections: Access (users and sessions,
+ * sign-in security), Connections (nodes with host-key confirmation and SSH test, Cloudflare accounts
+ * with token permission test), Alerts (Telegram/Discord, Monitoring thresholds and weekly summary),
+ * System (general, backups, config history, About & updates with release notes and update history). */
 "use strict";
 
 const ROLE_INFO = {
@@ -13,13 +14,27 @@ const checksHtml = (rows, nameKey) => `<ul class="checks">${rows.map((r) => `<li
 
 PAGES.settings = {
   role: "superadmin",
-  tabs: [["users", "Users"], ["cloudflare", "Cloudflare"], ["nodes", "Nodes"], ["notifications", "Notifications"], ["backups", "Backups"], ["general", "General"], ["about", "About & updates"]],
+  sections: [
+    ["Access", [["users", "Users & sessions", "Who can sign in, their roles, and signed-in browsers"], ["signin", "Sign-in security", "Where sign-in is allowed from, and alerts about sign-ins"]]],
+    ["Connections", [["nodes", "Nodes", "The servers this dashboard manages and watches over SSH"], ["cloudflare", "Cloudflare accounts", "API tokens for tunnels, DNS and traffic numbers"]]],
+    ["Alerts", [["notifications", "Notifications", "Telegram and Discord"], ["monitoring", "Monitoring", "How often things are checked, when an alert fires, and how long history is kept", "new"]]],
+    ["System", [["general", "General", "Dashboard address, alert history and config backups"], ["backups", "Backups", "Backups of this dashboard"], ["history", "Config history", "Every change to haproxy.cfg and tunnel configs"], ["about", "About & updates", "This dashboard's version, updates and release notes, and the software on your nodes"]]],
+  ],
+  get tabs() { return this.sections.flatMap(([, items]) => items); },
   mount(v, params) {
     this.tab = this.tabs.some((t) => t[0] === params[0]) ? params[0] : "users";
-    setHeader("Settings", "Superadmin only");
-    v.innerHTML = `<div class="stabs">${this.tabs.map(([k, l]) => `<a href="#/settings/${k}" class="${k === this.tab ? "on" : ""}">${l}</a>`).join("")}</div>
-      <div id="setBody"><div class="panel"><div class="empty">Loading…</div></div></div>`;
+    const cur = this.tabs.find((t) => t[0] === this.tab);
+    setHeader("Settings", "Superadmin · changes are recorded in Activity");
+    v.innerHTML = `<div class="setgrid"><nav class="snav">${this.sections.map(([g, items]) => `<div class="g">${g}</div>` + items.map(([k, l, , nw]) =>
+        `<a href="#/settings/${k}" class="${k === this.tab ? "on" : ""}" data-sk="${k}">${esc(l)}${nw ? `<span class="nw">${nw}</span>` : ""}</a>`).join("")).join("")}</nav>
+      <div class="scol"><div class="sph"><h2>${esc(cur[1])}</h2><span class="sub">${esc(cur[2])}</span></div>
+      <div id="setBody" class="scol"><div class="panel"><div class="empty">Loading…</div></div></div></div></div>`;
     v.addEventListener("click", (e) => this.onClick(e));
+    api("/api/system").then((d) => {
+      const n = (d.update?.available || []).length;
+      const a = $(`.snav [data-sk=about]`);
+      if (a && n) a.insertAdjacentHTML("beforeend", `<span class="b">${n}</span>`);
+    }).catch(() => {});
   },
   async load() { await this[this.tab](); },
 
@@ -119,7 +134,7 @@ PAGES.settings = {
       <div class="panel"><div class="hd"><h2>Where to find these</h2></div><div class="bd small help">
         <p><b>Account ID</b>: open <code>dash.cloudflare.com</code> → click one of your domains → scroll the right-hand column to the <b>API</b> box → <b>Account ID</b>. It is also the long code in the address bar: <code>dash.cloudflare.com/<b>3f8a91…</b>/home</code>.</p>
         <p><b>API token</b>: person icon (top right) → <b>Profile</b> → <b>API Tokens</b> → <b>Create Token</b> → <b>Create Custom Token</b>, with these permissions:</p>
-        <table class="mini-t"><tr><td>Account</td><td>Cloudflare Tunnel</td><td>Edit</td></tr><tr><td>Zone</td><td>Zone</td><td>Read</td></tr><tr><td>Zone</td><td>DNS</td><td>Edit</td></tr></table>
+        <table class="mini-t"><tr><td>Account</td><td>Cloudflare Tunnel</td><td>Edit</td></tr><tr><td>Zone</td><td>Zone</td><td>Read</td></tr><tr><td>Zone</td><td>DNS</td><td>Edit</td></tr><tr><td>Zone</td><td>Analytics</td><td>Read</td></tr></table>
         <p>Account Resources: your account · Zone Resources: All zones. Use <b>Test token</b> to confirm.</p></div></div>`;
   },
   cfForm(a) {
@@ -183,7 +198,7 @@ PAGES.settings = {
         <div class="acts"><button class="btn sm pri" data-a="addnode">+ Add node</button></div></div>
         <div class="bd flush tbl-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Address</th><th>SSH user</th><th>Host key</th><th></th></tr></thead><tbody>
         ${d.items.map((n) => `<tr><td><b>${esc(n.name)}</b>${n.site ? ` <span class="tag">${esc(n.site)}</span>` : ""}</td>
-          <td>${n.kind === "haproxy" ? "HAProxy" : "cloudflared"}</td><td class="mono small">${esc(n.host)}:${n.port}</td>
+          <td>${{ haproxy: "HAProxy", cloudflared: "cloudflared", server: "Server" }[n.kind] || esc(n.kind)}</td><td class="mono small">${esc(n.host)}:${n.port}</td>
           <td class="mono small">${esc(n.user)}${n.sudo ? " + sudo" : ""}</td>
           <td class="small">${n.host_key ? `<span class="mono" title="${esc(n.host_key)}">${esc(n.host_key.split(" ")[0])} pinned</span>` : `<span class="muted">known_hosts file</span>`}</td>
           <td><div class="row" style="justify-content:flex-end;flex-wrap:nowrap"><button class="btn sm" data-a="testnode" data-name="${esc(n.name)}">Test</button>
@@ -204,7 +219,7 @@ PAGES.settings = {
   nodeForm(n) {
     const k = n?.kind || "haproxy";
     const v = (f, def) => esc(n?.[f] ?? def);
-    return `<div class="two"><label>Type<select name="kind" ${n ? "disabled" : ""}><option value="haproxy" ${k === "haproxy" ? "selected" : ""}>HAProxy</option><option value="cloudflared" ${k === "cloudflared" ? "selected" : ""}>cloudflared</option></select></label>
+    return `<div class="two"><label>Type<select name="kind" ${n ? "disabled" : ""}><option value="haproxy" ${k === "haproxy" ? "selected" : ""}>HAProxy</option><option value="cloudflared" ${k === "cloudflared" ? "selected" : ""}>cloudflared</option><option value="server" ${k === "server" ? "selected" : ""}>Server (health and services only)</option></select></label>
         <label>Name<input name="name" type="text" required value="${v("name", "")}" placeholder="haproxy-dr"></label></div>
       <div class="two"><label>Host (IP or hostname)<input name="host" type="text" required value="${v("host", "")}" placeholder="192.168.20.10"></label>
         <label>SSH port<input name="port" type="text" value="${v("port", 22)}"></label></div>
@@ -221,6 +236,7 @@ PAGES.settings = {
           <label>Folder for new tunnels<input name="tunnel_base_dir" type="text" value="${v("tunnel_base_dir", "/root/.cloudflared")}"></label>
           <label>cloudflared binary<input name="cloudflared_bin" type="text" value="${v("cloudflared_bin", "cloudflared")}"></label></div>
           <label class="check" style="margin-top:10px"><input type="checkbox" name="discover" ${n ? (n.discover ? "checked" : "") : "checked"}> Auto-discover cloudflared services</label></div>
+        <div data-k="server" class="${k === "server" ? "" : "hidden"} small muted">Nothing to set for a server: CPU load, memory, disks and uptime are read over SSH. Choose services to watch on the Monitoring page.</div>
       </div></details>
       <div class="sep">Host key</div>
       <input type="hidden" name="host_key" value="${v("host_key", "")}">
@@ -439,72 +455,251 @@ PAGES.settings = {
     $("#setBody").innerHTML = `
       <form class="panel" id="genForm"><div class="hd"><h2>General</h2></div><div class="bd form" style="max-width:680px">
         <label>Dashboard URL<input name="dashboard_url" type="text" value="${esc(g.dashboard_url)}" placeholder="http://192.168.10.50:8088"><div class="hint">Used for links in Telegram/Discord messages.</div></label>
-        <div class="two"><label>Sign-in lasts (hours)<input name="session_hours" type="text" value="${g.session_hours}"></label>
-          <label>Check alerts every (seconds)<input name="alert_interval" type="text" value="${g.alert_interval}"></label></div>
-        <div class="two"><label>Keep alert history (days)<input name="alert_retention_days" type="text" value="${g.alert_retention_days}"></label>
-          <label>Config backups kept per file<input name="keep_backups" type="text" value="${g.keep_backups}"></label></div>
+        <div class="two"><label>Check alerts every (seconds)<input name="alert_interval" type="text" value="${g.alert_interval}"></label>
+          <label>Keep alert history (days)<input name="alert_retention_days" type="text" value="${g.alert_retention_days}"></label></div>
+        <div class="two"><label>Config backups kept per file<input name="keep_backups" type="text" value="${g.keep_backups}"></label><span></span></div>
         <label class="check"><input type="checkbox" name="drift_check" ${g.drift_check ? "checked" : ""}> Alert when a config file is changed outside the dashboard (checked every 15 minutes)</label>
-        <div class="sep">Sign-in security</div>
-        <label class="check"><input type="checkbox" name="signin_alerts" ${g.signin_alerts ? "checked" : ""}> Message me (Telegram/Discord) on a sign-in from a new address, and when an address is locked out after failed attempts</label>
-        <label>Allow sign-in only from these networks<input name="allowed_networks" type="text" value="${esc(g.allowed_networks)}" placeholder="anywhere — e.g. 192.168.10.0/24, 100.64.0.0/10">
-          <div class="hint">Comma-separated addresses or networks. Empty = anywhere. Your current address must be in the list. Locked out? On the server: <code>gwconsole allow-all</code></div></label>
         <div class="row"><button class="btn pri" type="submit">Save</button><span class="grow"></span><a class="btn" href="#/setup">Run the setup wizard again</a></div></div></form>
       <div class="panel"><div class="hd"><h2>System</h2></div><div class="bd"><dl class="kv">
         <dt>Database</dt><dd class="mono small">${esc(d.db_path)}</dd>
         <dt>Alert checker</dt><dd>${d.engine.last_run ? `last run ${esc(fmt.ago(d.engine.last_run))}` : "not run yet"}${d.engine.last_error ? ` · <span style="color:var(--crit)">${esc(d.engine.last_error)}</span>` : ""}</dd>
         ${d.imported && (d.imported.users || d.imported.nodes || d.imported.cf_accounts) ? `<dt>Imported</dt><dd>from config.yaml on ${esc(fmt.time(d.imported.at))}</dd>` : ""}</dl></div></div>`;
-    $("#genForm").addEventListener("submit", async (e) => {
+    this.saveForm($("#genForm"), () => this.general());
+  },
+  saveForm(form, after) {
+    form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const fd = Object.fromEntries(new FormData(e.target).entries());
-      ["drift_check", "signin_alerts"].forEach((k) => (fd[k] = $(`[name=${k}]`, e.target).checked));
-      try { await api("/api/admin/general", { method: "PUT", body: fd }); toast("Saved", "ok"); this.general(); }
+      $$("input[type=checkbox]", e.target).forEach((c) => (fd[c.name] = c.checked));
+      try { await api("/api/admin/general", { method: "PUT", body: fd }); toast("Saved", "ok"); after(); }
       catch (err) { toast(err.message, "bad"); }
     });
   },
 
+  async signin() {
+    const d = await api("/api/admin/general");
+    if (S.page !== "settings") return;
+    const g = d.settings;
+    $("#setBody").innerHTML = `
+      <form class="panel" id="signForm"><div class="hd"><h2>Sign-in security</h2></div><div class="bd form" style="max-width:680px">
+        <label>Allow sign-in only from these networks<input name="allowed_networks" type="text" value="${esc(g.allowed_networks)}" placeholder="anywhere — e.g. 192.168.10.0/24, 100.64.0.0/10">
+          <div class="hint">Comma-separated addresses or networks. Empty = anywhere. Your current address must be in the list. Locked out? On the server: <code>gwconsole allow-all</code></div></label>
+        <label class="check"><input type="checkbox" name="signin_alerts" ${g.signin_alerts ? "checked" : ""}> Message me (Telegram/Discord) on a sign-in from a new address, and when an address is locked out after failed attempts</label>
+        <div class="two"><label>Sign-in lasts (hours)<input name="session_hours" type="text" value="${g.session_hours}"></label><span></span></div>
+        <div class="row"><button class="btn pri" type="submit">Save</button></div></div></form>
+      <div class="panel"><div class="bd small muted">Signed-in browsers are listed under <a href="#/settings/users">Users &amp; sessions</a>, where you can sign any of them out.</div></div>`;
+    this.saveForm($("#signForm"), () => this.signin());
+  },
+
+  // ============================================================ MONITORING
+  async monitoring() {
+    const d = await api("/api/admin/monitor");
+    if (S.page !== "settings" || this.tab !== "monitoring") return;
+    const m = d.settings;
+    const num = (k, l, hint = "") => `<label>${l}<input name="${k}" type="text" value="${esc(m[k])}">${hint ? `<div class="hint">${hint}</div>` : ""}</label>`;
+    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    $("#setBody").innerHTML = `<form class="scol" id="monForm">
+      <div class="panel"><div class="hd"><h2>Checks</h2></div><div class="form2">
+        ${num("check_every", "Check sites every (seconds)")}${num("health_every", "Read server health every (seconds)")}
+        ${num("down_after", "Site is down after (failed checks in a row)")}${num("slow_ms", "Site is slow above (ms)", "Per-site override in the site's details on the Monitoring page")}
+      </div></div>
+      <div class="panel"><div class="hd"><h2>Alert thresholds</h2><span class="meta">warning / critical</span></div><div class="form2">
+        <label>Disk used (%)<span class="pair"><input name="disk_warn" type="text" value="${m.disk_warn}"> / <input name="disk_crit" type="text" value="${m.disk_crit}"></span></label>
+        ${num("mem_crit", "Memory used — critical (%)")}
+        <label>CPU load above (× cores) for (minutes)<span class="pair"><input name="load_factor" type="text" value="${m.load_factor}"> for <input name="load_minutes" type="text" value="${m.load_minutes}"></span></label>
+        <label>Backend 5xx above (%) for (minutes), at least (requests)<span class="pair"><input name="err5xx_pct" type="text" value="${m.err5xx_pct}"> for <input name="err5xx_minutes" type="text" value="${m.err5xx_minutes}"> min <input name="err5xx_min" type="text" value="${m.err5xx_min}"></span></label>
+        <label>Certificate expires in (days)<span class="pair"><input name="cert_warn" type="text" value="${m.cert_warn}"> / <input name="cert_crit" type="text" value="${m.cert_crit}"></span></label>
+        <label>Watched service stopped<input type="text" value="critical, right away" disabled></label>
+      </div></div>
+      <div class="grid2">
+        <div class="panel"><div class="hd"><h2>History</h2><span class="meta">${d.db_bytes ? `database now ${fmt.bytes(d.db_bytes)}` : ""}</span></div><div class="form2">
+          ${num("keep_raw_hours", "Every minute for (hours)")}${num("keep_15m_days", "15-minute averages for (days)")}${num("keep_daily_days", "Daily traffic totals for (days)")}
+        </div></div>
+        <div class="panel"><div class="hd"><h2>Weekly summary</h2><span class="meta">to your Notifications channels</span></div><div class="form2">
+          <label>Day<select name="summary_day">${days.map((x, i) => `<option value="${i}" ${+m.summary_day === i ? "selected" : ""}>${x}</option>`).join("")}</select></label>
+          <label>Time<input name="summary_time" type="text" value="${esc(m.summary_time)}"></label>
+          <label class="full">Time zone (also used for daily traffic)<input name="summary_tz" type="text" value="${esc(m.summary_tz)}"></label>
+          <div class="full opts"><label><input type="checkbox" name="summary_enabled" ${m.summary_enabled ? "checked" : ""}> Send it</label>
+            <label><input type="checkbox" name="summary_telegram" ${m.summary_telegram ? "checked" : ""}> Telegram</label>
+            <label><input type="checkbox" name="summary_discord" ${m.summary_discord ? "checked" : ""}> Discord</label>
+            <button type="button" class="btn xs" data-a="sumtest">Send one now</button></div>
+        </div></div>
+      </div>
+      <div class="panel"><div class="hd"><h2>Don't check these</h2><span class="meta">Sites found automatically that you don't want watched</span></div>
+        <div class="bd small">${d.excluded.map((h) => `<span class="svc">${esc(h)} <button type="button" data-a="unexcl" data-host="${esc(h)}" title="Check it again">✕</button></span>`).join("") || `<span class="muted">None. Use “Don't check this site” in a site's details on the Monitoring page.</span>`}</div></div>
+      <div class="row"><button class="btn pri" type="submit">Save</button></div></form>`;
+    $("#monForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = Object.fromEntries(new FormData(e.target).entries());
+      $$("input[type=checkbox]", e.target).forEach((c) => (fd[c.name] = c.checked));
+      try { await api("/api/admin/monitor", { method: "PUT", body: fd }); toast("Saved", "ok"); this.monitoring(); }
+      catch (err) { toast(err.message, "bad"); }
+    });
+  },
+  async act_sumtest(ds, btn) {
+    busy(btn, true);
+    try {
+      const r = await api("/api/admin/monitor/summary", { body: {} });
+      modal({ title: "Weekly summary sent", body: `<pre class="out">${esc(r.text || "")}</pre><p class="small muted">Sent to the channels ticked above that are switched on under Notifications.</p>`, actions: [{ label: "Close", value: true }] });
+    } finally { busy(btn, false); }
+  },
+  async act_unexcl(ds) {
+    await api(`/api/monitor/sites/${encodeURIComponent(ds.host)}`, { method: "PUT", body: { excluded: false } });
+    toast(`${ds.host} is checked again`, "ok");
+    this.monitoring();
+  },
+
+  // ============================================================ CONFIG HISTORY
+  async history() {
+    const h = await api("/api/admin/config-history?limit=100").catch((e) => ({ items: [], error: e.message }));
+    if (S.page !== "settings" || this.tab !== "history") return;
+    $("#setBody").innerHTML = `<div class="panel"><div class="hd"><h2>Changes</h2><span class="meta">From the dashboard or made outside it · stored in a local git repository</span></div>
+      <div class="bd flush tbl-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th></th></tr></thead><tbody>
+      ${(h.items || []).map((c) => `<tr><td class="small">${esc(fmt.short(c.at))}</td><td>${c.author === "outside the dashboard" ? pill("warn", "outside the dashboard") : esc(c.author)}</td>
+        <td class="small">${esc(c.subject)}</td><td><button class="btn sm" data-a="histshow" data-id="${esc(c.id)}">Show</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">${esc(h.error || "Nothing recorded yet — the first copy is taken at the next check.")}</td></tr>`}
+      </tbody></table></div></div>`;
+  },
+
   // ============================================================ ABOUT & UPDATES
   async about() {
-    const [d, v, h] = await Promise.all([api("/api/system"), api("/api/versions").catch((e) => ({ error: e.message, items: [] })),
-      api("/api/admin/config-history?limit=30").catch(() => ({ items: [] }))]);
+    const [d, v] = await Promise.all([api("/api/system"), api("/api/versions").catch((e) => ({ error: e.message, items: [] }))]);
     if (S.page !== "settings" || this.tab !== "about") return;
-    const u = d.update || {};
-    const avail = u.available || [];
-    const running = u.state === "running";
-    const sw = (v.items || []).map((x) => `<tr><td><b>${esc(x.node)}</b></td><td>${x.kind === "haproxy" ? "HAProxy" : "cloudflared"}</td>
-        <td class="mono small">${esc(x.installed || "–")}</td>
-        <td class="mono small">${esc(x.kind === "haproxy" ? (x.candidate || "–") : (x.latest || "–"))}${x.latest_error ? ` <span class="muted">(${esc(x.latest_error)})</span>` : ""}</td>
-        <td>${x.error ? pill("crit", "unreachable") : x.update ? pill("warn", "update available") : pill("ok", "up to date")}</td>
-        <td>${x.kind === "cloudflared" && x.update ? `<button class="btn sm op" data-a="cfdupdate" data-name="${esc(x.node)}">Update cloudflared</button>`
-          : x.kind === "haproxy" && x.update ? `<span class="muted small">update through the OS in a maintenance window</span>` : ""}</td></tr>`).join("");
+    const u = d.update || {}, avail = u.available || [], running = u.state === "running", host = d.host || {};
+    const next = avail[0];
+    const rel = Object.fromEntries((d.releases || []).map((r) => [r.version, r]));
+    const me = rel[d.version] || {};
+    const hist = d.history || [];
+    const lastUp = hist.find((h) => h.result === "done" && String(h.to || "").replace(/^v/, "") === d.version && h.from);
+    const typeName = { patch: "bug-fix release", minor: "feature release", major: "major release", first: "first release" };
+    const checked = u.checked_at ? `checked ${fmt.ago(u.checked_at)}${u.checked_by && u.checked_by !== "schedule" ? ` by ${esc(u.checked_by)}` : " (nightly)"}` : "not checked yet";
+    const newer = (x) => { const a = String(x || "").replace(/^v/, "").split(".").map(Number), b = d.version.split(".").map(Number); for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); return false; };
+    // a failed update only matters while this dashboard is still older than the version it tried
+    const recentFail = ["rolled_back", "failed"].includes(u.state) && u.finished_at && Date.now() / 1000 - u.finished_at < 7 * 86400 && newer(u.target);
+    const opt = (k, label) => `<label><input type="checkbox" data-gs="${k}" ${d.settings?.[k] ? "checked" : ""}> ${label}</label>`;
+    const steps = (to) => `<div class="steps">What happens: <span>① Back up settings &amp; database</span><i>→</i><span>② Install ${esc(to)}</span><i>→</i><span>③ Health check</span><i>→</i><span>④ Back to v${esc(d.version)} if it fails</span></div>`;
+    let box;
+    if (running) {
+      box = `<div class="ubox"><div class="st"><div class="ic">⟳</div><div><h3>Updating to ${esc(u.target)}…</h3><div class="sub">${esc(u.message || "installing")}</div></div>
+        <div class="r"><button class="btn sm pri" data-a="updwatch">Show progress</button></div></div>${steps(u.target)}</div>`;
+    } else if (next) {
+      const notes = this.relSections(next.notes);
+      box = `<div class="ubox"><div class="st"><div class="ic">↑</div><div><h3>Update available: ${esc(next.version)}</h3>
+          <div class="sub">${esc(typeName[this.relType(next.version)])}${next.date ? ` · ${esc(next.date)}` : ""} · ${checked}${avail.length > 1 ? ` · ${avail.length} versions newer than yours` : ""}</div></div>
+        <div class="r"><button class="btn sm" data-a="updcheck">Check now</button><button class="btn sm pri" data-a="updinstall" data-v="${esc(next.version)}">Update to ${esc(next.version)}</button></div></div>
+        <div class="chg"><b>What's in ${esc(next.version)}</b><ul style="margin:4px 0 0;padding-left:18px;color:var(--muted)">${Object.entries(notes).flatMap(([k, items]) => items.slice(0, 4).map((i) => `<li>${esc(k)}: ${this.inl(i)}</li>`)).slice(0, 6).join("")}</ul>
+          <span class="sub">Full notes in Version history below.</span></div>
+        ${steps(next.version)}
+        <div class="opts">${opt("update_check", "Check every night")}${opt("auto_update_patch", "Install bug-fix releases (x.y.Z) automatically")}${opt("update_notify", "Message me on Telegram/Discord when a new version is out")}</div></div>`;
+    } else {
+      box = `<div class="ubox ${recentFail ? "bad" : "ok"}"><div class="st"><div class="ic">${recentFail ? "!" : "✓"}</div><div>
+          <h3>${recentFail ? esc(u.message || "The last update failed") : u.checked_at ? "You're on the newest version" : "Check for updates"}</h3><div class="sub">${checked}${d.pending ? " · <b>waiting for the helper service…</b>" : ""}</div></div>
+        <div class="r">${recentFail ? `<button class="btn sm" data-a="updwatch">Show log</button>` : ""}<button class="btn sm ${u.checked_at ? "" : "pri"}" data-a="updcheck">Check now</button></div></div>
+        ${u.error ? `<div class="out bad">${esc(u.error)}</div>` : ""}
+        <div class="small muted">An update backs up settings and the database first. If the new version doesn't start, it goes back to this one automatically.</div>
+        <div class="opts">${opt("update_check", "Check every night")}${opt("auto_update_patch", "Install bug-fix releases (x.y.Z) automatically")}${opt("update_notify", "Message me on Telegram/Discord when a new version is out")}</div></div>`;
+    }
+    const sw = (v.items || []).map((x) => `<tr><td><b>${esc(x.node)}</b><div class="sub">${x.kind === "haproxy" ? "HAProxy" : "cloudflared"}</div></td>
+        <td class="mono small" title="${esc(x.installed || "")}">${esc(String(x.installed || "–").split(/[-+~]/)[0])}</td>
+        <td class="mono small" title="${esc(x.kind === "haproxy" ? x.candidate || "" : x.latest || "")}">${esc(String(x.kind === "haproxy" ? (x.candidate || "–") : (x.latest || "–")).split(/[-+~]/)[0])}${x.latest_error ? ` <span class="muted" title="${esc(x.latest_error)}">?</span>` : ""}</td>
+        <td>${x.error ? pill("crit", "unreachable") : x.kind === "cloudflared" && x.update ? `<button class="btn xs pri op" data-a="cfdupdate" data-name="${esc(x.node)}">Update</button>`
+          : x.update ? `<span class="sub" title="Update HAProxy through the OS in a maintenance window">${pill("warn", "update available")}</span>` : pill("ok", "up to date")}</td></tr>`).join("");
+    const items = [
+      ...avail.map((a) => ({ version: a.version.replace(/^v/, ""), date: a.date || "", type: this.relType(a.version), summary: "", sections: this.relSections(a.notes), avail: true })),
+      ...(d.releases || []).filter((r) => !avail.some((a) => a.version.replace(/^v/, "") === r.version)),
+    ];
+    this.relItems = items;
+    if (!this.relOpen) this.relOpen = new Set([d.version, ...(next ? [next.version.replace(/^v/, "")] : [])]);
     $("#setBody").innerHTML = `
-      <div class="panel"><div class="hd"><h2>Gateway Console</h2><span class="meta">v${esc(d.version)}${d.build && d.build !== `v${d.version}` ? ` · ${esc(d.build)}` : ""}${d.source === "tarball" ? " · installed from a tarball" : ""}</span>
-        <div class="acts"><button class="btn sm" data-a="updcheck" ${running ? "disabled" : ""}>Check for updates</button></div></div>
-        <div class="bd">
-          ${running ? `<div class="out">Updating to ${esc(u.target)}… <button class="btn sm" data-a="updwatch">Show progress</button></div>` : ""}
-          ${u.state && u.state !== "running" && u.message ? `<div class="out ${u.state === "done" ? "ok" : "bad"}">${esc(u.message)}${u.state !== "done" ? ` <button class="btn sm" data-a="updwatch">Show log</button>` : ""}</div>` : ""}
-          ${u.error ? `<div class="out bad">${esc(u.error)}</div>` : ""}
-          <div class="small muted" style="margin-bottom:10px">${u.checked_at ? `Last checked ${esc(fmt.ago(u.checked_at))}${u.checked_by && u.checked_by !== "schedule" ? ` by ${esc(u.checked_by)}` : " (nightly)"}.` : "Not checked yet."}
-            ${d.pending ? ` <b>Waiting for the helper service…</b>` : ""}</div>
-          ${avail.length ? avail.map((a, i) => `<div class="card upd"><div class="t">${esc(a.version)} ${a.date ? `<span class="muted small">${esc(a.date)}</span>` : ""}
-              ${i === 0 ? `<span class="r"><button class="btn sm pri" data-a="updinstall" data-v="${esc(a.version)}" ${running ? "disabled" : ""}>Update to ${esc(a.version)}</button></span>` : ""}</div>
-              <div class="md">${mdLite(a.notes.replace(/^## .*\n?/, ""))}</div></div>`).join("")
-            : `<div class="empty ok" style="padding:14px">${u.checked_at ? "You're on the newest version." : "Click “Check for updates”."}</div>`}
-          <div class="row" style="margin-top:12px;gap:18px"><label class="check"><input type="checkbox" data-gs="update_check" ${d.settings?.update_check ? "checked" : ""}> Check every night</label>
-            <label class="check"><input type="checkbox" data-gs="auto_update_patch" ${d.settings?.auto_update_patch ? "checked" : ""}> Install bug-fix releases (x.y.<b>Z</b>) automatically</label></div>
-          <div class="muted small">An update backs up settings and the database first. If the new version doesn't start, it goes back to this one automatically.</div>
-        </div></div>
-      <div class="panel"><div class="hd"><h2>What's new in v${esc(d.version)}</h2></div><div class="bd md">${mdLite((d.whatsnew || "").replace(/^## .*\n?/, "")) || `<span class="muted">No notes.</span>`}</div></div>
-      <div class="panel"><div class="hd"><h2>Software on your nodes</h2><span class="meta">cloudflared vs the latest Cloudflare release · HAProxy vs your OS packages</span></div>
-        <div class="bd flush tbl-wrap"><table><thead><tr><th>Node</th><th>Software</th><th>Installed</th><th>Available</th><th></th><th></th></tr></thead>
-        <tbody>${sw || `<tr><td colspan="6" class="empty">${esc(v.error || "No nodes.")}</td></tr>`}</tbody></table></div></div>
-      <div class="panel"><div class="hd"><h2>Config history</h2><span class="meta">Every change to haproxy.cfg and tunnel configs — from the dashboard or made outside it</span></div>
-        <div class="bd flush tbl-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th></th></tr></thead><tbody>
-        ${(h.items || []).map((c) => `<tr><td class="small">${esc(fmt.short(c.at))}</td><td>${c.author === "outside the dashboard" ? pill("warn", "outside the dashboard") : esc(c.author)}</td>
-          <td class="small">${esc(c.subject)}</td><td><button class="btn sm" data-a="histshow" data-id="${esc(c.id)}">Show</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">Nothing recorded yet — the first copy is taken at the next check.</td></tr>`}
-        </tbody></table></div></div>`;
+      <div class="hero2">
+        <div class="vcard"><div class="brand2">GW<b>//</b>CONSOLE</div>
+          <div class="big">v${esc(d.version)} <small>installed</small></div>
+          <dl>${me.date ? `<dt>Released</dt><dd>${esc(this.day(me.date))} · ${esc(typeName[me.type] || "")}</dd>` : ""}
+            <dt>Installed here</dt><dd>${lastUp ? `${esc(fmt.time(lastUp.at))} by ${esc(lastUp.by || "?")}` : hist[0] ? esc(fmt.time(hist.find((h) => String(h.to || "").replace(/^v/, "") === d.version)?.at || hist[0].at)) : "–"}</dd>
+            <dt>Installed from</dt><dd>${d.source === "tarball" ? "a release tarball (update with install.sh)" : "GitHub (git clone)"}${d.build && d.build !== `v${d.version}` ? ` · ${esc(d.build)}` : ""}</dd>
+            <dt>Running for</dt><dd>${host.running != null ? fmt.dur(host.running) : "–"}</dd>
+            ${lastUp ? `<dt>Previous version</dt><dd>${esc(String(lastUp.from).replace(/^v?/, "v"))} · kept for rollback</dd>` : ""}
+            <dt>Host</dt><dd class="mono small">${esc([host.hostname, host.os, host.python ? "Python " + host.python : ""].filter(Boolean).join(" · "))}</dd></dl></div>
+        ${box}
+      </div>
+      <div class="grid2b">
+        <div class="panel"><div class="hd"><h2>Version history</h2><span class="meta">Release notes for every version</span>
+          <div class="acts"><span class="segs" id="relF">${[["all", "All"], ["feat", "Features"], ["fix", "Fixes"]].map(([k, l]) => `<button type="button" data-a="relf" data-f="${k}" class="${(this.relFilter || "all") === k ? "on" : ""}">${l}</button>`).join("")}</span></div></div>
+          <div class="tl" id="relTl"></div></div>
+        <div class="scol">
+          <div class="panel"><div class="hd"><h2>Update history</h2><span class="meta">on this dashboard</span></div>
+            <div class="bd flush tbl-wrap">${hist.length ? `<table><thead><tr><th>When</th><th>Change</th><th>By</th><th>Result</th><th></th></tr></thead><tbody>
+            ${hist.slice(0, 12).map((h, i) => `<tr><td class="small">${esc(fmt.short(h.at))}</td>
+              <td class="mono small">${h.kind === "install" ? `install ${esc(h.to)}` : `${esc(String(h.from || "?").replace(/^v/, ""))} → ${esc(String(h.to).replace(/^v/, ""))}`}</td><td>${esc(h.by || "–")}</td>
+              <td>${h.result === "done" ? pill("ok", `done${h.seconds ? ` · ${h.seconds} s` : ""}`) : h.result === "rolled_back" ? pill("warn", "rolled back") : pill("crit", h.result)}</td>
+              <td>${i === 0 && h.by !== "installer" && hist[0].kind === "upgrade" ? `<button class="btn xs" data-a="updwatch">Log</button>` : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="empty">No updates recorded yet.</div>`}</div></div>
+          <div class="panel"><div class="hd"><h2>Software on your nodes</h2></div>
+            <div class="bd flush tbl-wrap"><table><thead><tr><th>Node</th><th>Installed</th><th>Latest</th><th></th></tr></thead>
+            <tbody>${sw || `<tr><td colspan="4" class="empty">${esc(v.error || "No nodes.")}</td></tr>`}</tbody></table></div></div>
+        </div>
+      </div>`;
+    this.drawReleases(d.version);
     $$("[data-gs]").forEach((c) => c.addEventListener("change", async () => {
       try { await api("/api/admin/general", { method: "PUT", body: { [c.dataset.gs]: c.checked } }); toast("Saved", "ok"); } catch (err) { toast(err.message, "bad"); c.checked = !c.checked; }
     }));
+  },
+  day(iso) { return new Date(iso + "T00:00:00").toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" }); },
+  inl(t) { return esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>"); },
+  relType(v) {
+    const [x, y, z] = String(v).replace(/^v/, "").split(".").map(Number);
+    return x === 1 && y === 0 && z === 0 ? "first" : z ? "patch" : y === 0 ? "major" : "minor";
+  },
+  relSections(md) {
+    const out = {};
+    let sec = null;
+    for (const line of String(md || "").split("\n")) {
+      const h = line.match(/^### (.+)/);
+      if (h) { sec = out[h[1].split("/")[0].trim()] = []; continue; }
+      if (!sec) continue;
+      if (/^- /.test(line)) sec.push(line.slice(2).trim());
+      else if (/^\s+\S/.test(line) && !/^\s+- /.test(line) && sec.length) sec[sec.length - 1] += " " + line.trim();
+    }
+    return out;
+  },
+  drawReleases(cur) {
+    const f = this.relFilter || "all";
+    const tag = { patch: ["patch", "bug fix"], minor: ["minor", "features"], major: ["major", "major"], first: ["first", "first release"] };
+    const rows = (this.relItems || []).filter((r) => f === "all" || (f === "fix" ? r.type === "patch" : r.type !== "patch"));
+    $("#relTl").innerHTML = rows.map((r) => {
+      const open = this.relOpen.has(r.version);
+      const c = Object.fromEntries(Object.entries(r.sections).map(([k, v]) => [k.toLowerCase(), v.length]));
+      const summary = r.summary || (r.sections.Added || r.sections.Fixed || r.sections.Changed || []).map((i) => (i.match(/^\*\*(.+?)\*\*/) || [, i.split(":")[0].split(". ")[0]])[1]).slice(0, 3).join("; ");
+      const cols = ["Added", "Changed", "Fixed"].filter((k) => r.sections[k]?.length);
+      return `<div class="tli ${r.version === cur ? "cur" : r.avail ? "new" : ""}"><div class="rail"><i></i></div><div class="body">
+        <div class="top2"><span class="ver">v${esc(r.version)}</span><span class="tag2 ${tag[r.type][0]}">${tag[r.type][1]}</span>${r.date ? `<span class="date">${esc(this.day(r.date))}</span>` : ""}
+          ${r.version === cur ? pill("ok", "installed") : r.avail ? pill("warn", "available") : ""}
+          <span class="cnt">${c.added ? `<span class="cn a">${c.added} added</span>` : ""}${c.changed ? `<span class="cn c">${c.changed} changed</span>` : ""}${c.fixed ? `<span class="cn f">${c.fixed} fixed</span>` : ""}</span></div>
+        <div class="ttl ${r.avail ? "muted" : ""}">${this.inl(summary)}</div>
+        ${open && cols.length ? `<div class="notes" style="grid-template-columns:repeat(${cols.length},minmax(0,1fr))">${cols.map((k) => `<div><h4>${k}</h4><ul>${r.sections[k].map((i) => `<li>${this.inl(this.head(i))}</li>`).join("")}</ul></div>`).join("")}</div>` : ""}
+        <button type="button" class="tog" data-a="reltog" data-v="${esc(r.version)}">${open ? "Hide notes ▴" : "Show notes ▾"}</button>
+        ${open && cols.length ? ` <button type="button" class="tog" data-a="relfull" data-v="${esc(r.version)}">· Full notes</button>` : ""}</div></div>`;
+    }).join("") || `<div class="empty">No releases match.</div>`;
+  },
+  /** the short head of a changelog item: its bold title, or its first sentence */
+  head(i) {
+    const b = i.match(/^\*\*(.+?)\*\*/);
+    if (b) return `**${b[1].replace(/[.:]$/, "")}**`;
+    const t = i.split(/(?<=\.)\s|:\s/)[0];
+    return t.length > 110 ? t.slice(0, 107) + "…" : t;
+  },
+  act_relfull(ds) {
+    const r = (this.relItems || []).find((x) => x.version === ds.v);
+    if (!r) return;
+    const md = Object.entries(r.sections).map(([k, items]) => `### ${k}\n` + items.map((i) => `- ${i}`).join("\n")).join("\n");
+    modal({ title: `What's in v${r.version}`, size: "lg", body: `<div class="md">${mdLite(md)}</div>`, actions: [{ label: "Close", value: true }] });
+  },
+  act_reltog(ds) {
+    this.relOpen.has(ds.v) ? this.relOpen.delete(ds.v) : this.relOpen.add(ds.v);
+    this.drawReleases($(".tli.cur .ver")?.textContent.replace(/^v/, ""));
+  },
+  act_relf(ds) {
+    this.relFilter = ds.f;
+    $$("#relF button").forEach((b) => b.classList.toggle("on", b.dataset.f === ds.f));
+    this.drawReleases($(".tli.cur .ver")?.textContent.replace(/^v/, ""));
   },
   async act_updcheck(ds, btn) {
     busy(btn, true);
