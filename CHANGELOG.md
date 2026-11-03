@@ -5,6 +5,52 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-03
+### Added
+- **Add sites and edit HAProxy without typing config.** "+ Add" on the HAProxy page opens one form
+  with a Frontend part (new / use existing / none), a Backend part (new / use existing / none) and an
+  optional Cloudflare part (adds the hostname to a tunnel and creates its DNS record). Website (HTTP)
+  or TCP service; typing the hostname fills in the names and the tunnel target.
+  - Frontend tabs: Routing (host, path, header, source IP, method, TLS SNI → backend, redirect,
+    redirect to HTTPS, deny, allow only from IPs, set header; reorder), Bind & HTTPS, Headers &
+    redirects, Limits & timeouts (incl. rate limit per IP), Advanced.
+  - Backend tabs: Servers (weight, max conn, check, backup for DR, and per server HTTPS, SNI, PROXY
+    protocol, check timing, cookie, start disabled), Health check, Headers, Timeouts & retries, Advanced.
+  - Live plan, checks (name free, hostname not routed elsewhere, HTTP/TCP modes match, port free,
+    servers reachable from the HAProxy node) and the exact haproxy.cfg diff; `haproxy -c` before apply;
+    the HAProxy change is undone if the Cloudflare step fails.
+  - Edit / Delete on every frontend and backend (same form, one part); delete is refused while a
+    backend is still in use. "+ server" and ✕ to add or remove one server.
+  - Edits are merged in place: unchanged lines keep their formatting and position, lines the form
+    doesn't understand stay in Advanced exactly as written.
+- **New HAProxy header**: six tiles — service (uptime, start time in your time zone, restarts),
+  backends and servers up/down, connections vs maxconn, rates, traffic and 5xx share, HAProxy version.
+- **Update from the dashboard** (Settings → About & updates): nightly or on-demand check, changelog of
+  each new version, "Update now" with a live log, automatic rollback to the previous version if the
+  new one doesn't start, optional automatic install of bug-fix releases, Telegram/Discord message
+  when a new version is out, and a one-time "Updated to … — see what's new" banner for everyone.
+  Runs through a small root helper (systemd `gwconsole-helper.path`) that accepts only a fixed list
+  of requests.
+- **Backups of the dashboard** (Settings → Backups, `gwconsole backup` / `gwconsole restore`): nightly
+  and before every update/restore, optional copy to a node over SSH, passphrase-encrypted download.
+- **Config history**: every change to haproxy.cfg and tunnel configs is committed to a local git
+  repository with who made it. **Changed outside the dashboard** alerts (checked every 15 minutes) with
+  "Accept change" on the Alerts page.
+- **Node software** (Settings → About & updates): cloudflared vs the latest Cloudflare release and
+  HAProxy vs the OS packages; **Update cloudflared** restarts the tunnels one at a time and rolls
+  back if one doesn't come back.
+- **Sign-in security** (Settings → General): message on a sign-in from a new address and when an address
+  is locked out after failed attempts; optional **allowed networks** for sign-in and the API
+  (`gwconsole allow-all` to reset).
+
+### Changed
+- Settings has new tabs: Backups and About & updates (version info moved there).
+- `install.sh` installs the helper units, keeps backups readable by the dashboard (root:gwconsole) and
+  copies CHANGELOG.md for "What's new".
+
+### Fixed
+- Tunnels page: the empty state still pointed to config.yaml; it now links to Settings → Nodes.
+
 ## [1.2.0] - 2026-11-03
 ### Added
 - **Config editor in a side panel**: "Edit config" on the HAProxy and Tunnels pages opens the
