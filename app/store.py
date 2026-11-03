@@ -26,7 +26,17 @@ GENERAL_DEFAULTS = {
     "alert_retention_days": 90,
     "dashboard_url": "",
     "keep_backups": 20,
+    # v1.3
+    "update_check": True,          # daily check for new versions (root helper)
+    "auto_update_patch": False,    # install x.y.Z patch releases automatically
+    "nightly_backup": True,
+    "backup_copy_node": "",        # copy nightly backups to this node over SSH ("" = off)
+    "backup_copy_dir": "/var/backups/gwconsole-dashboard",
+    "signin_alerts": True,         # message on sign-in from a new IP and on failed-login bursts
+    "allowed_networks": "",        # sign-in only from these CIDRs ("" = anywhere)
+    "drift_check": True,           # alert when a config file is changed outside the dashboard
 }
+BOOL_SETTINGS = {"update_check", "auto_update_patch", "nightly_backup", "signin_alerts", "drift_check"}
 NOTIFY_DEFAULTS = {
     "telegram": {"enabled": False, "bot_token_enc": "", "chat_id": "", "min_severity": "warn", "recoveries": True},
     "discord": {"enabled": False, "webhook_enc": "", "min_severity": "warn", "recoveries": True},
@@ -39,6 +49,33 @@ def now() -> int:
 
 def _tok_hash(tok: str) -> str:
     return hashlib.sha256(tok.encode()).hexdigest()
+
+
+def normalize_networks(v) -> str:
+    """'192.168.10.0/24, 100.64.0.0/10' → canonical, validated, comma-separated."""
+    import ipaddress
+    out = []
+    for part in re.split(r"[\s,]+", str(v or "").strip()):
+        if not part:
+            continue
+        try:
+            out.append(str(ipaddress.ip_network(part, strict=False)))
+        except ValueError:
+            raise ValueError(f"'{part}' is not an IP address or network (e.g. 192.168.10.0/24)")
+    return ", ".join(dict.fromkeys(out))
+
+
+def ip_allowed(ip: str, networks: str) -> bool:
+    import ipaddress
+    if not networks.strip():
+        return True
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if a.version == 6 and a.ipv4_mapped:
+        a = a.ipv4_mapped
+    return a.is_loopback or any(a in ipaddress.ip_network(n.strip(), strict=False) for n in networks.split(",") if n.strip())
 
 
 def check_password_strength(pw: str):
@@ -191,6 +228,18 @@ class Store:
                 v = str(v or "").strip().rstrip("/")
                 if v and not re.match(r"^https?://[^\s]+$", v):
                     raise ValueError("dashboard URL must start with http:// or https://")
+            elif k in BOOL_SETTINGS:
+                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            elif k == "backup_copy_node":
+                v = str(v or "").strip()
+                if v and not self.db.one("SELECT 1 FROM nodes WHERE name=?", (v,)):
+                    raise ValueError(f"no node named {v}")
+            elif k == "backup_copy_dir":
+                v = str(v or "").strip().rstrip("/") or GENERAL_DEFAULTS["backup_copy_dir"]
+                if not re.fullmatch(r"/[A-Za-z0-9_./\-]{1,200}", v) or ".." in v:
+                    raise ValueError("backup folder must be an absolute path")
+            elif k == "allowed_networks":
+                v = normalize_networks(v)
             else:
                 v = int(v)
                 lim = {"session_hours": (1, 720), "alert_interval": (10, 3600),
