@@ -191,11 +191,15 @@ PAGES.settings = {
             <button class="btn sm danger" data-a="delnode" data-name="${esc(n.name)}">Delete</button></div></td></tr>
           <tr class="hidden" data-testrow="${esc(n.name)}"><td colspan="6"></td></tr>`).join("") || `<tr><td colspan="6" class="empty">No nodes yet.</td></tr>`}
         </tbody></table></div></div>
-      <div class="panel"><div class="hd"><h2>Prepare a new node</h2></div><div class="bd small help">
-        <p>1. Copy <code>prepare-node.sh</code> to the node and run it as root (add <code>--haproxy</code> on an HAProxy VM). It allows this dashboard's SSH key, from this dashboard only:</p>
-        <pre class="out" id="prepCmd">bash prepare-node.sh --key "${esc(d.pubkey)}" --from ${esc(ipHint)}</pre>
-        <div class="row"><button class="btn sm" data-a="copy" data-target="prepCmd">Copy command</button><span class="muted">Replace ${esc(ipHint)} with this LXC's IP if it differs.</span></div>
-        <p>2. Click <b>+ Add node</b>, scan and confirm the host key, test, save.</p></div></div>`;
+      <div class="panel"><div class="hd"><h2>How adding a node works</h2></div><div class="bd small help">
+        <p>Any Linux host with SSH works — a VM, an LXC or bare metal. Click <b>+ Add node</b>, enter its address, <b>scan</b> and confirm the host key, then either:</p>
+        <p>• <b>Use the node's password once</b> — the dashboard logs in one time, installs its SSH key (accepted only from this dashboard), <code>socat</code> and HAProxy's admin socket, then forgets the password. Or</p>
+        <p>• <b>Run a command on the node</b> yourself, as root:</p>
+        <pre class="out" id="prepCmd">${esc(this.prepCmd(d.pubkey, ipHint))}</pre>
+        <div class="row"><button class="btn sm" data-a="copy" data-target="prepCmd">Copy command</button><span class="muted">${ipHint.startsWith("<") ? "Put this dashboard's IP after --from." : `--from is the address the node sees this dashboard as; the Add node form fills it in exactly.`}</span></div></div></div>`;
+  },
+  prepCmd(pubkey, fromIp) {
+    return `curl -fsSL ${location.origin}/prepare-node.sh | bash -s -- --key "${pubkey}" --from ${fromIp}`;
   },
   nodeForm(n) {
     const k = n?.kind || "haproxy";
@@ -204,9 +208,9 @@ PAGES.settings = {
         <label>Name<input name="name" type="text" required value="${v("name", "")}" placeholder="haproxy-dr"></label></div>
       <div class="two"><label>Host (IP or hostname)<input name="host" type="text" required value="${v("host", "")}" placeholder="192.168.20.10"></label>
         <label>SSH port<input name="port" type="text" value="${v("port", 22)}"></label></div>
-      <div class="two"><label>SSH user<input name="user" type="text" value="${v("user", "root")}"></label>
+      <div class="two"><label data-manual class="${n ? "" : "hidden"}">SSH user<input name="user" type="text" value="${v("user", "root")}"></label>
         <label>Site label (optional)<input name="site" type="text" value="${v("site", "")}" placeholder="DC1 / DR"></label></div>
-      <label class="check"><input type="checkbox" name="sudo" ${n?.sudo ? "checked" : ""}> Not root: use <code>sudo</code> (user needs passwordless sudo)</label>
+      <label class="check ${n ? "" : "hidden"}" data-manual><input type="checkbox" name="sudo" ${n?.sudo ? "checked" : ""}> Not root: use <code>sudo</code> (user needs passwordless sudo)</label>
       <details ${n ? "" : ""}><summary>Paths &amp; service names</summary><div style="margin-top:10px;display:flex;flex-direction:column;gap:10px">
         <div data-k="haproxy" class="${k === "haproxy" ? "" : "hidden"}"><div class="two">
           <label>haproxy.cfg<input name="config_path" type="text" value="${v("config_path", "/etc/haproxy/haproxy.cfg")}"></label>
@@ -223,7 +227,26 @@ PAGES.settings = {
       <div data-hk class="small">${n?.host_key ? `Pinned: <span class="mono">${esc(n.host_key.slice(0, 60))}…</span>` : `<span class="muted">Not scanned yet.</span>`}</div>
       <div class="row"><button type="button" class="btn sm" data-scan>Scan host key</button><button type="button" class="btn sm" data-ntest>Test connection</button></div>
       <label class="check hidden" data-confirmrow><input type="checkbox" name="hk_ok"> I checked this fingerprint against the node (<code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>)</label>
-      <div data-ntestres></div>`;
+      <div data-ntestres></div>
+      <div class="sep">Access</div>
+      <div class="radios">
+        ${n ? `<label class="check"><input type="radio" name="access" value="keep" checked> Already set up</label>` : ""}
+        <label class="check"><input type="radio" name="access" value="password" ${n ? "" : "checked"}> Use the node's password once <span class="muted">— easiest</span></label>
+        <label class="check"><input type="radio" name="access" value="command"> I'll run a command on the node</label>
+      </div>
+      <div data-acc="password" class="${n ? "hidden" : ""}">
+        <div class="two"><label>Log in as<input name="bs_login" type="text" value="root" autocomplete="off"></label>
+          <label>Password<input name="bs_password" type="password" autocomplete="new-password"></label></div>
+        <div class="hint">Used once to install this dashboard's SSH key — accepted only from this dashboard — then forgotten: never stored or logged.
+          Debian and Ubuntu block root password logins by default; enter a sudo user there and the dashboard still connects as root with its key
+          (or as that user with sudo, if root can't log in over SSH at all).</div>
+        <label class="check ${k === "haproxy" ? "" : "hidden"}" data-k="haproxy" style="margin-top:8px"><input type="checkbox" name="bs_fix" checked> Set up HAProxy's admin stats socket and <code>socat</code> if missing</label>
+      </div>
+      <div data-acc="command" class="hidden">
+        <div class="hint">Run this as root on the node (it asks nothing else), then press Save:</div>
+        <pre class="out" data-cmd style="margin-top:6px"></pre>
+        <div class="row"><button type="button" class="btn sm" data-copycmd>Copy</button><span class="muted small" data-cmdnote></span></div>
+      </div>`;
   },
   nodeFormOpen(orig) {
     return (f) => {
@@ -235,11 +258,27 @@ PAGES.settings = {
         fd.port = +fd.port || 22;
         return fd;
       };
+      let fromIp = /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) ? location.hostname : "";
+      const cmd = () => {
+        $("[data-cmd]", f).textContent = this.prepCmd(this.cache?.pubkey || "<gwconsole pubkey>", fromIp || "<this-dashboard-ip>");
+        $("[data-cmdnote]", f).textContent = fromIp ? `${fromIp} = this dashboard as the node sees it` : "scan the host key first to fill in this dashboard's IP";
+      };
+      cmd();
+      $$("[name=access]", f).forEach((r) => r.addEventListener("change", () => {
+        const a = $("[name=access]:checked", f).value;
+        $$("[data-acc]", f).forEach((x) => x.classList.toggle("hidden", x.dataset.acc !== a));
+        $$("[data-manual]", f).forEach((x) => x.classList.toggle("hidden", a === "password"));   // set automatically
+        $("[data-submit]", f.closest("form") || f).textContent = a === "password" ? "Set up & save" : "Save node";
+      }));
+      $("[data-copycmd]", f).addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText($("[data-cmd]", f).textContent); toast("Copied", "ok"); } catch { toast("Select the text and copy it manually", "bad"); }
+      });
       $("[data-scan]", f).addEventListener("click", async (e) => {
         const fd = vals();
         busy(e.target, true);
         try {
           const r = await api("/api/admin/nodes/scan", { body: { host: fd.host, port: fd.port } });
+          if (r.from_ip) { fromIp = r.from_ip; cmd(); }
           $("[name=host_key]", f).value = r.key;
           $("[data-hk]", f).innerHTML = `<div class="fp"><b>${esc(r.type)}</b> <span class="mono">${esc(r.fingerprint)}</span></div>`;
           $("[data-confirmrow]", f).classList.remove("hidden");
@@ -262,14 +301,35 @@ PAGES.settings = {
       const confirmRow = $("[data-confirmrow]", f);
       if (!confirmRow.classList.contains("hidden") && !fd.hk_ok) throw new Error("tick the box to confirm the host key fingerprint");
       if (!orig && !v.host_key) throw new Error("scan the host key first");
-      delete v.hk_ok;
+      const access = fd.access || "keep", out = [];
+      ["hk_ok", "access", "bs_login", "bs_password", "bs_fix"].forEach((x) => delete v[x]);
+      if (access === "password") {
+        if (!v.host_key) throw new Error("scan and confirm the host key first");
+        if (!fd.bs_password) throw new Error("enter the node's password (or pick another access option)");
+        const b = await api("/api/admin/nodes/bootstrap", { body: { host: v.host, port: v.port, login: fd.bs_login || "root",
+          password: fd.bs_password, host_key: v.host_key, fix_socket: v.kind === "haproxy" ? !!fd.bs_fix : false } });
+        if (!b.ok) throw new Error(`${b.error}\n\n${b.output}`);
+        Object.assign(v, b.node);
+        if (v.kind === "haproxy" && b.found?.haproxy === "0") out.push("⚠ haproxy isn't installed on this node yet");
+        if (v.kind === "cloudflared" && b.found?.cloudflared === "0") out.push("⚠ cloudflared isn't installed on this node yet");
+        out.push(`✔ SSH key installed for ${b.node.user} (accepted only from ${b.from_ip}); the password was not kept`);
+      }
       if (orig) await api(`/api/admin/nodes/${encodeURIComponent(orig)}`, { method: "PUT", body: v });
       else await api("/api/admin/nodes", { body: v });
-      return { ok: true, output: `Node ${v.name} saved.` };
+      out.push(`✔ node ${v.name} saved`);
+      let ok = true;
+      try {
+        const t = await api("/api/admin/nodes/test", { body: { name: v.name } });
+        out.push("", "Connection test:", ...t.checks.map((c) => `${c.ok ? "✔" : "✘"} ${c.check} — ${c.detail}`));
+        ok = t.checks.every((c) => c.ok);
+        if (!ok) out.push("", access === "command" ? "Run the command on the node, then use Test in the node list."
+          : "Fix what's marked ✘ (Test in the node list re-checks; a missing stats socket has a 'Fix it' button there).");
+      } catch (err) { ok = false; out.push(`✘ test failed: ${err.message}`); }
+      return { ok, output: out.join("\n") };
     };
   },
   async act_addnode() {
-    const changed = await taskModal({ title: "Add node", submit: "Save node", size: "", html: this.nodeForm(null),
+    const changed = await taskModal({ title: "Add node", submit: "Set up & save", size: "", html: this.nodeForm(null),
       onOpen: this.nodeFormOpen(null), run: this.nodeSubmit(null) });
     if (changed) { S.inv = await api("/api/inventory"); refresh(true); }
   },
@@ -282,11 +342,21 @@ PAGES.settings = {
   async act_testnode(ds, btn) {
     const row = $(`[data-testrow="${CSS.escape(ds.name)}"]`);
     row.classList.remove("hidden");
-    const td = $("td", row);
+    const td = $("td", row) || row;
     td.innerHTML = `<div class="muted small">Testing…</div>`;
     busy(btn, true);
-    try { td.innerHTML = checksHtml((await api("/api/admin/nodes/test", { body: { name: ds.name } })).checks, "check"); }
+    try {
+      const r = await api("/api/admin/nodes/test", { body: { name: ds.name } });
+      const sockBad = r.checks.some((c) => !c.ok && (c.check === "admin stats socket" || c.check === "socat"));
+      td.innerHTML = checksHtml(r.checks, "check") +
+        (sockBad ? `<div class="row" style="margin-top:6px"><button class="btn sm pri" data-a="fixsock" data-name="${esc(ds.name)}">Fix it: set up the stats socket &amp; socat</button></div>` : "");
+    }
     catch (err) { td.innerHTML = `<div class="out bad">${esc(err.message)}</div>`; } finally { busy(btn, false); }
+  },
+  async act_fixsock(ds, btn) {
+    busy(btn, true);
+    try { if (await fixStatsSocket(ds.name)) await this.act_testnode(ds, $(`[data-a=testnode][data-name="${CSS.escape(ds.name)}"]`)); }
+    finally { busy(btn, false); }
   },
   async act_delnode(ds) {
     if (!(await confirmBox(`Remove node ${ds.name}?`, "<p>The dashboard stops managing it. Nothing changes on the node itself.</p>", "Remove", "danger"))) return;
@@ -299,9 +369,10 @@ PAGES.settings = {
   },
 
   // ============================================================ NOTIFICATIONS
-  async notifications() {
+  async notifications(box) {
+    box = box || $("#setBody");
     const d = await api("/api/admin/notify");
-    if (S.page !== "settings") return;
+    if (!box.isConnected) return;
     const st = (ch) => {
       const s = d.status[ch];
       if (!s) return `<span class="muted">Nothing sent yet.</span>`;
@@ -309,7 +380,7 @@ PAGES.settings = {
     };
     const sev = (v) => `<select name="min_severity"><option value="warn" ${v === "warn" ? "selected" : ""}>Warnings and critical</option><option value="crit" ${v === "crit" ? "selected" : ""}>Critical only</option></select>`;
     const tg = d.telegram, dc = d.discord;
-    $("#setBody").innerHTML = `
+    box.innerHTML = `
       <div class="grid2">
       <form class="panel form-panel" data-ch="telegram"><div class="hd"><h2>Telegram</h2>${tg.enabled ? pill("ok", "on") : pill("mute", "off")}</div><div class="bd form">
         <label class="check"><input type="checkbox" name="enabled" ${tg.enabled ? "checked" : ""}> Send alerts to Telegram</label>
@@ -334,7 +405,7 @@ PAGES.settings = {
       </div></form></div>
       <div class="panel"><div class="bd small muted">Messages are sent only when an alert starts, escalates or resolves — never repeated while it keeps firing, and never for muted alerts.
         Several changes in one check are combined into one message. ${d.dashboard_url ? `Messages link to <span class="mono">${esc(d.dashboard_url)}</span>.` : `Set the <a href="#/settings/general">dashboard URL</a> to get a link in each message.`}</div></div>`;
-    $$("form[data-ch]").forEach((form) => {
+    $$("form[data-ch]", box).forEach((form) => {
       const ch = form.dataset.ch;
       const vals = () => {
         const fd = Object.fromEntries(new FormData(form).entries());
@@ -346,7 +417,7 @@ PAGES.settings = {
       form.addEventListener("submit", (e) => e.preventDefault());
       $("[data-save]", form).addEventListener("click", async (e) => {
         busy(e.target, true);
-        try { await api(`/api/admin/notify/${ch}`, { method: "PUT", body: vals() }); toast(`${ch} saved`, "ok"); this.notifications(); }
+        try { await api(`/api/admin/notify/${ch}`, { method: "PUT", body: vals() }); toast(`${ch} saved`, "ok"); this.notifications(box); }
         catch (err) { toast(err.message, "bad"); } finally { busy(e.target, false); }
       });
       $("[data-test]", form).addEventListener("click", async (e) => {
@@ -372,7 +443,7 @@ PAGES.settings = {
           <label>Check alerts every (seconds)<input name="alert_interval" type="text" value="${g.alert_interval}"></label></div>
         <div class="two"><label>Keep alert history (days)<input name="alert_retention_days" type="text" value="${g.alert_retention_days}"></label>
           <label>Config backups kept per file<input name="keep_backups" type="text" value="${g.keep_backups}"></label></div>
-        <div class="row"><button class="btn pri" type="submit">Save</button></div></div></form>
+        <div class="row"><button class="btn pri" type="submit">Save</button><span class="grow"></span><a class="btn" href="#/setup">Run the setup wizard again</a></div></div></form>
       <div class="panel"><div class="hd"><h2>About</h2></div><div class="bd"><dl class="kv">
         <dt>Version</dt><dd>v${esc(d.version)}</dd><dt>Database</dt><dd class="mono small">${esc(d.db_path)}</dd>
         <dt>Alert checker</dt><dd>${d.engine.last_run ? `last run ${esc(fmt.ago(d.engine.last_run))}` : "not run yet"}${d.engine.last_error ? ` · <span style="color:var(--crit)">${esc(d.engine.last_error)}</span>` : ""}</dd>
