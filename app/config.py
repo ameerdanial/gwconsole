@@ -1,4 +1,10 @@
-"""Load and validate /etc/gwconsole/config.yaml."""
+"""Load and validate /etc/gwconsole/config.yaml.
+
+Since v1.2.0 config.yaml is the *bootstrap* file: listen address, port and file
+paths. Users, nodes and Cloudflare accounts found in it are imported into the
+database once (see store.import_from_yaml); after that the web UI is the source
+of truth and the dataclasses below are rebuilt from the database.
+"""
 from __future__ import annotations
 
 import os
@@ -22,6 +28,7 @@ class SSHTarget:
     port: int = 22
     user: str = "root"
     sudo: bool = False
+    host_key: str = ""   # pinned OpenSSH public key ("ssh-ed25519 AAAA..."); empty = use known_hosts file
 
 
 @dataclass
@@ -72,7 +79,13 @@ class Settings:
     ssh_known_hosts: str | None = "/etc/gwconsole/known_hosts"
     ssh_connect_timeout: int = 8
     audit_log: str = "/var/lib/gwconsole/audit.log"
+    db_path: str = "/var/lib/gwconsole/gwconsole.db"
+    secret_key_file: str = "/etc/gwconsole/secret.key"
     keep_backups: int = 20
+    # general settings (overridden from the database at runtime)
+    alert_interval: int = 30
+    alert_retention_days: int = 90
+    dashboard_url: str = ""
     haproxy_nodes: list[HAProxyNode] = field(default_factory=list)
     cloudflared_nodes: list[CloudflaredNode] = field(default_factory=list)
     cf_accounts: dict[str, CFAccount] = field(default_factory=dict)
@@ -128,11 +141,11 @@ def load(path: str | None = None) -> Settings:
     s = Settings()
     s.listen = str(raw.get("listen", s.listen))
     s.port = int(raw.get("port", s.port))
-    s.users = {str(k): str(v) for k, v in (raw.get("users") or {}).items()}
-    if not s.users:
-        raise ConfigError("at least one user is required under 'users:' (see: python -m app hashpw)")
+    s.users = {str(k): str(v) for k, v in (raw.get("users") or {}).items()}   # imported once into the DB
     s.session_hours = int(raw.get("session_hours", s.session_hours))
     s.audit_log = str(raw.get("audit_log", s.audit_log))
+    s.db_path = str(raw.get("db_path", s.db_path))
+    s.secret_key_file = str(raw.get("secret_key_file", s.secret_key_file))
     s.keep_backups = int(raw.get("keep_backups", s.keep_backups))
 
     ssh = raw.get("ssh") or {}
