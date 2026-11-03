@@ -1,0 +1,28 @@
+[Unit]
+Description=Gateway Console (HAProxy + cloudflared dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gwconsole
+Group=gwconsole
+WorkingDirectory=/opt/gwconsole
+EnvironmentFile=-/etc/gwconsole/env
+Environment=GWC_CONFIG=/etc/gwconsole/config.yaml
+ExecStart=/opt/gwconsole/venv/bin/python -m app serve
+Restart=on-failure
+RestartSec=3
+
+# hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/gwconsole
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
