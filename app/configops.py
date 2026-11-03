@@ -5,6 +5,8 @@ and automatic rollback to the backup if activate or the health check fails.
 """
 from __future__ import annotations
 
+import asyncio
+
 import difflib
 import hashlib
 import re
@@ -14,6 +16,9 @@ from .config import SSHTarget
 from .sshpool import NodeError, SSHPool
 
 TS_RE = r"\d{8}-\d{6}"
+
+
+ON_APPLIED = None   # set by main: (node, path, content, stage) → remember hash + config history commit
 
 
 def sha(content: str) -> str:
@@ -89,6 +94,11 @@ echo "@@GWC:OK"
         "backup" if "BACKUP_FAILED" in out else
         "write" if "WRITE_FAILED" in out else "unknown")
     clean = "\n".join(l for l in out.splitlines() if not l.startswith("@@GWC:")).strip()
+    if stage == "applied" and ON_APPLIED:
+        try:
+            await asyncio.to_thread(ON_APPLIED, t.name, cfg_path, content, stage)
+        except Exception:      # history is best-effort, never fails a change
+            pass
     return {"ok": stage == "applied", "stage": stage, "backup": backup, "output": clean,
             "diff_stats": diff_stats(unified_diff(current, content, cfg_path))}
 
