@@ -8,6 +8,9 @@
   python -m app users                  list users and roles
   python -m app hashpw                 print a scrypt hash (for config.yaml, legacy)
   python -m app version                print the installed version
+  python -m app backup [--quiet]       snapshot settings, keys and database (+ copy to a node if set)
+  python -m app restore <file>         put a backup back (stops/starts the service; asks for the passphrase)
+  python -m app allow-all              remove the "allowed networks" sign-in restriction (locked out)
 """
 from __future__ import annotations
 
@@ -82,6 +85,17 @@ def main():
             print(f"{u['username']:<24} {u['role']:<11} {state}")
     elif cmd == "check":
         asyncio.run(_check())
+    elif cmd == "backup":
+        _backup("--quiet" in sys.argv)
+    elif cmd == "restore":
+        if not arg:
+            sys.exit("usage: restore <backup file>")
+        _restore(arg)
+    elif cmd == "allow-all":
+        _, store = _store()
+        store.set_general({"allowed_networks": ""})
+        _fix_db_owner(store)
+        print("sign-in is allowed from any address again")
     elif cmd == "serve":
         import uvicorn
         from .config import load
@@ -89,6 +103,82 @@ def main():
         uvicorn.run("app.main:app", host=s.listen, port=s.port, proxy_headers=False, log_level="info")
     else:
         sys.exit(__doc__)
+
+
+def _fix_db_owner(store=None):
+    """CLI commands run as root: never leave database files the service can't write."""
+    import glob
+    import os
+    import pwd
+    from .config import load
+    try:
+        u = pwd.getpwnam("gwconsole")
+    except KeyError:
+        return
+    db = load().db_path
+    for f in glob.glob(db + "*"):
+        try:
+            if os.stat(f).st_uid == 0:
+                os.chown(f, u.pw_uid, u.pw_gid)
+        except OSError:
+            pass
+
+
+def _backup(quiet: bool):
+    import os
+    from . import __version__, backup
+    from .config import load
+    base = load()
+    etc = os.path.dirname(os.environ.get("GWC_CONFIG", "/etc/gwconsole/config.yaml"))
+    path = backup.make(etc, base.db_path, base.audit_log, __version__)
+    print(path)
+    _, store = _store()
+    g = store.general()
+    if g.get("backup_copy_node"):
+        row = next((n for n in store.node_rows() if n["name"] == g["backup_copy_node"]), None)
+        try:
+            if not row:
+                raise RuntimeError(f"node {g['backup_copy_node']} no longer exists")
+            print(backup.copy(path, row, base.ssh_key_file, g["backup_copy_dir"]))
+        except (RuntimeError, ValueError, OSError) as e:
+            print(f"copy to {g['backup_copy_node']} failed: {e}")
+            _fix_db_owner()
+            sys.exit(2)
+    _fix_db_owner()
+
+
+def _restore(path: str):
+    import os
+    import subprocess
+    from . import __version__, backup
+    from .config import load
+    if os.geteuid() != 0:
+        sys.exit("run as root")
+    base = load()
+    blob = open(path, "rb").read()
+    if blob.startswith(backup.MAGIC):
+        pw = os.environ.get("GWC_BACKUP_PASSPHRASE") or getpass.getpass("Passphrase: ")
+        try:
+            blob = backup.decrypt(blob, pw)
+        except ValueError as e:
+            sys.exit(str(e))
+    try:
+        names = backup.check_archive(blob)
+    except Exception as e:
+        sys.exit(f"not a usable backup: {e}")
+    print(f"restoring {len(names)} files from {path}")
+    subprocess.run(["systemctl", "stop", "gwconsole"], check=False)
+    etc = os.path.dirname(os.environ.get("GWC_CONFIG", "/etc/gwconsole/config.yaml"))
+    safety = backup.make(etc, base.db_path, base.audit_log, __version__, prefix="before-restore")
+    print(f"current state saved first: {safety}")
+    backup.restore(blob)
+    for cmd in (["chown", "root:gwconsole", "/etc/gwconsole", "/etc/gwconsole/config.yaml", "/etc/gwconsole/secret.key"],
+                ["chmod", "640", "/etc/gwconsole/config.yaml", "/etc/gwconsole/secret.key"],
+                ["chown", "gwconsole:gwconsole", "/etc/gwconsole/id_ed25519"], ["chmod", "600", "/etc/gwconsole/id_ed25519"],
+                ["chown", "-R", "gwconsole:gwconsole", "/var/lib/gwconsole"]):
+        subprocess.run(cmd, check=False, capture_output=True)
+    subprocess.run(["systemctl", "start", "gwconsole"], check=False)
+    print("restored and started — sign in with the accounts from that backup")
 
 
 async def _check():
