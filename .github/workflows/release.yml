@@ -1,3 +1,5 @@
+# Release: when a vX.Y.Z tag is pushed, check it matches VERSION, build the tarball
+# and publish a GitHub Release with that version's notes from CHANGELOG.md.
 name: Release
 
 on:
