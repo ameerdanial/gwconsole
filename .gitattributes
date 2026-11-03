@@ -1,0 +1,5 @@
+# Keep LF everywhere: the code runs on Linux, and CRLF breaks bash scripts and systemd units.
+* text=auto eol=lf
+*.sh text eol=lf
+*.service text eol=lf
+*.png binary
