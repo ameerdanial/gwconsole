@@ -20,8 +20,8 @@ from .cfapi import Cloudflare
 from .config import CFAccount, CloudflaredNode, HAProxyNode
 from .inventory import Inventory
 from .sshpool import NodeError, SSHPool, scan_host_key
-from .state import COOKIE, audit, need, st, user
-from .store import ROLES, check_password_strength
+from .state import COOKIE, audit, ip, need, st, user
+from .store import ROLES, check_password_strength, ip_allowed, normalize_networks
 
 router = APIRouter(prefix="/api")
 HOST_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
@@ -636,6 +636,10 @@ async def general_get(request: Request):
 @router.put("/admin/general")
 async def general_put(request: Request, body: dict = Body(...)):
     need(request, "superadmin")
+    if "allowed_networks" in body:
+        nets = normalize_networks(body["allowed_networks"])
+        if not ip_allowed(ip(request), nets):
+            raise ValueError(f"that list doesn't include your own address ({ip(request)}) — saving it would lock you out")
     g = st.store.set_general(body)
     await st.reload()
     audit(request, "settings change", "general", True, ", ".join(f"{k}={v}" for k, v in body.items()))
