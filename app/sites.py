@@ -1,0 +1,152 @@
+"""Public hostnames and where they go.
+
+Finds every hostname from tunnel ingress rules and HAProxy host rules, and works out each one's
+route end to end: Cloudflare → tunnel → origin service → HAProxy frontend → backend → servers.
+Used by the CF Tunnels page (route column, Hostnames tab) and by Monitoring (which sites to check).
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from urllib.parse import urlsplit
+
+from . import configops, hpcfg
+from .sshpool import NodeError
+from .state import st
+
+HP_TTL = 60
+_hp_cache: dict = {"at": 0.0, "nodes": (), "data": {}}
+ANY = {"", "*", "0.0.0.0", "::", "[::]"}
+
+
+async def hp_models(fresh: bool = False) -> dict[str, dict]:
+    """node → {host, frontends, backends, error}, parsed from each HAProxy node's config (cached 60 s)."""
+    names = tuple(n.name for n in st.s.haproxy_nodes)
+    c = _hp_cache
+    if not fresh and c["nodes"] == names and time.time() - c["at"] < HP_TTL:
+        return c["data"]
+
+    async def one(n):
+        try:
+            d = hpcfg.parse(await configops.read_file(st.pool, n, n.config_path))
+            return n.name, {"host": n.host, "frontends": d["frontends"], "backends": d["backends"], "error": None}
+        except (NodeError, OSError, ValueError) as e:
+            return n.name, {"host": n.host, "frontends": [], "backends": [], "error": str(e)}
+
+    data = dict(await asyncio.gather(*(one(n) for n in st.s.haproxy_nodes)))
+    c.update(at=time.time(), nodes=names, data=data)
+    return data
+
+
+def forget_models():
+    _hp_cache["at"] = 0.0
+
+
+def split_service(service: str) -> tuple[str, str, int | None]:
+    """'http://10.0.10.21:8080' → ('http', '10.0.10.21', 8080). Non-network services → (scheme, '', None)."""
+    s = (service or "").strip()
+    if "://" not in s:
+        return s.split(":", 1)[0], "", None
+    u = urlsplit(s)
+    port = u.port or {"http": 80, "https": 443, "ssh": 22, "rdp": 3389}.get(u.scheme)
+    return u.scheme, (u.hostname or ""), port
+
+
+def _bind_parts(addr: str) -> tuple[str, int | None]:
+    a = addr.split("@", 1)[-1]            # ipv4@:80
+    host, _, port = a.rpartition(":")
+    try:
+        return host.strip("[]"), int(port)
+    except ValueError:
+        return host, None
+
+
+def find_frontend(models: dict, ip: str, port: int | None) -> tuple[str, dict] | None:
+    """The HAProxy frontend listening on ip:port, if one of the managed nodes is that address."""
+    if not ip or not port:
+        return None
+    for node, m in models.items():
+        for fe in m["frontends"]:
+            for b in fe.get("binds") or []:
+                for one in str(b.get("addr", "")).split(","):
+                    bip, bport = _bind_parts(one)
+                    if bport == port and (bip == ip or (bip in ANY and ip in (m["host"], "127.0.0.1", "localhost"))):
+                        return node, fe
+    return None
+
+
+def backend_for(fe: dict, hostname: str) -> tuple[str, str]:
+    """(backend, 'rule' | 'default' | '') — which backend a request for `hostname` ends up in."""
+    h = (hostname or "").lower()
+    for r in fe.get("rules") or []:
+        if r.get("cond") in ("host", "sni") and r.get("action") == "backend":
+            if h in {v.lower() for v in str(r.get("value", "")).split()}:
+                return r.get("target", ""), "rule"
+    return fe.get("default_backend", ""), ("default" if fe.get("default_backend") else "")
+
+
+def route(models: dict, hostname: str, service: str) -> dict:
+    """Where one ingress rule's traffic goes after cloudflared."""
+    scheme, ip, port = split_service(service)
+    kind = "http" if scheme in ("http", "https") else ("tcp" if port else "other")
+    r = {"service": service, "kind": kind, "hp_node": "", "frontend": "", "backend": "", "how": "", "direct": True}
+    f = find_frontend(models, ip, port)
+    if f:
+        node, fe = f
+        be, how = backend_for(fe, hostname)
+        r.update(hp_node=node, frontend=fe["name"], backend=be, how=how, direct=False)
+    return r
+
+
+def servers_up(hp_status: list[dict], node: str, backend: str) -> tuple[int, int] | None:
+    for n in hp_status:
+        if n.get("node") != node:
+            continue
+        for be in n.get("backends", []):
+            if be["name"] == backend:
+                srv = be["servers"]
+                up = sum(1 for s in srv if s["status"].startswith("UP") or s["status"] == "no check")
+                return up, len(srv)
+    return None
+
+
+async def discover(tunnels: dict | None = None) -> list[dict]:
+    """Every public hostname: [{host, kind, source, internal, route, tunnel}] (one per hostname)."""
+    from .collect import tunnels_full
+    if tunnels is None:
+        tunnels = await tunnels_full(with_dns=False)
+    models = await hp_models()
+    out: dict[str, dict] = {}
+    for n in tunnels.get("nodes", []):
+        for t in n.get("tunnels", []):
+            for rule in t["config"].get("ingress", []):
+                h = (rule.get("hostname") or "").lower()
+                if not h or "*" in h or h in out:
+                    continue
+                rt = route(models, h, rule.get("service", ""))
+                if rt["kind"] == "other":
+                    continue
+                out[h] = {"host": h, "kind": rt["kind"], "source": "tunnel", "path": rule.get("path") or "",
+                          "internal": rule.get("service", ""), "route": rt,
+                          "tunnel": {"node": n["node"], "name": t["name"], "account": t.get("cf_account", "")}}
+    for node, m in models.items():                      # hosts HAProxy routes that no tunnel publishes
+        for fe in m["frontends"]:
+            binds = [_bind_parts(b.get("addr", "").split(",")[0]) + (b.get("ssl"),) for b in fe.get("binds") or []]
+            if not binds:
+                continue
+            for r in fe.get("rules") or []:
+                if r.get("cond") not in ("host", "sni") or r.get("action") != "backend":
+                    continue
+                for h in str(r.get("value", "")).lower().split():
+                    if "*" in h or h.startswith(".") or h in out:
+                        continue
+                    _, port, ssl = binds[0]
+                    tcp = fe.get("mode") == "tcp" or r.get("cond") == "sni"
+                    scheme = "tcp" if tcp and r.get("cond") != "sni" else ("https" if ssl or r.get("cond") == "sni" else "http")
+                    internal = f"{scheme}://{m['host']}:{port}"
+                    out[h] = {"host": h, "kind": "tcp" if scheme == "tcp" else "http", "source": "haproxy", "path": "",
+                              "internal": internal,
+                              "route": {"service": internal, "kind": "http", "hp_node": node, "frontend": fe["name"],
+                                        "backend": r.get("target", ""), "how": "rule", "direct": False},
+                              "tunnel": None}
+    return sorted(out.values(), key=lambda x: x["host"])
