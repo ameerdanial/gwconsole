@@ -7,7 +7,7 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 |---|---|
 | `main.py` | App startup, login, role guard, and the gateway APIs (overview, HAProxy, tunnels, config editor, activity) |
 | `api_alerts.py` | Alerts API: active/history, acknowledge, mutes, CSV export, check now |
-| `api_admin.py` | Superadmin APIs: users, sessions, Cloudflare accounts, nodes, notifications, general settings; change own password |
+| `api_admin.py` | Superadmin APIs: users, sessions, Cloudflare accounts, nodes (incl. "use the node's password once" setup), notifications, general settings, setup wizard; change own password |
 | `state.py` | Shared runtime state (settings, SSH pool, Cloudflare client, store) and role/audit helpers |
 | `collect.py` | Gathers live state from all nodes and Cloudflare, and turns it into alert rules |
 | `alerts.py` | Background alert engine: firing → resolved lifecycle, flapping, mutes, retention, notifications |
@@ -20,15 +20,16 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 | `audit.py` | Append-only audit log (`audit.log`) |
 | `sshpool.py` | Persistent SSH connections to nodes, host-key pinning and scanning |
 | `configops.py` | Safe config apply: validate, backup, write, reload, health check, rollback; backup listing |
-| `haproxy.py` | HAProxy: runtime stats via the admin socket, server state, reload/restart, config target |
+| `haproxy.py` | HAProxy: runtime stats via the admin socket, server state, reload/restart, config target, admin-socket fixer |
 | `cloudflared.py` | cloudflared: service status, ingress parsing, rule test, config target |
 | `inventory.py` | Auto-discovers cloudflared tunnels from systemd units on each node |
 | `tunnelops.py` | Tunnel lifecycle on nodes: create, archive-delete, comment-preserving ingress edits |
 | `cfapi.py` | Cloudflare API client: tunnels, DNS routes, create/delete, token permission test |
-| `__main__.py` | Command line: serve, check, create-admin, reset-password, users, version |
+| `__main__.py` | Command line: serve, check, create-admin, reset-password (`--password-stdin` for install.sh), users, version |
 | `static/index.html` | Page shell: login form, sidebar, header |
 | `static/style.css` | All styling (dark theme, tables, forms, side panel, settings) |
 | `static/js/core.js` | Helpers, API client, modals, roles, login and password flow, router |
 | `static/js/editor.js` | Config editor side panel with History tab |
 | `static/js/overview.js` · `haproxy.js` · `tunnels.js` · `alerts.js` · `activity.js` · `settings.js` | One file per page |
+| `static/js/setup.js` | First-run setup wizard: Nodes → Cloudflare → Alerts → Done (reuses the Settings forms) |
 | `static/js/app.js` | Entry point: starts the app |
