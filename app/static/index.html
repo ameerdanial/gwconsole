@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gateway Console</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Cpath d='M8 11h16M8 16h10M8 21h16' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form id="loginForm" autocomplete="on">
+      <div class="brand">GW<b>//</b>CONSOLE<small>HAProxy · Cloudflare Tunnel</small></div>
+      <input name="user" type="text" placeholder="Username" autocomplete="username" required>
+      <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+      <div class="err" id="loginErr"></div>
+      <button class="btn pri" type="submit">Sign in</button>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <aside class="side">
+      <div class="brand">GW<b>//</b>CONSOLE<small>Gateway control</small></div>
+      <nav class="nav" id="nav">
+        <a href="#/overview" data-p="overview">Overview <span class="count hidden" id="alertCount"></span></a>
+        <a href="#/haproxy" data-p="haproxy">HAProxy</a>
+        <a href="#/tunnels" data-p="tunnels">Tunnels</a>
+        <a href="#/config" data-p="config">Config</a>
+        <a href="#/activity" data-p="activity">Activity</a>
+      </nav>
+      <div class="foot">
+        <div>Signed in as <b id="who"></b></div>
+        <div class="ver" id="ver"></div>
+        <button class="btn sm" id="logout">Sign out</button>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="top">
+        <div>
+          <h1 id="title">Overview</h1>
+          <div class="sub" id="subtitle"></div>
+        </div>
+        <div class="spacer"></div>
+        <span class="sub" id="updated"></span>
+        <span class="pulse" id="pulse" title="refresh status"></span>
+        <label class="sub row" title="Auto refresh"><input type="checkbox" id="auto" checked> auto</label>
+        <button class="btn sm" id="refresh">Refresh</button>
+      </header>
+      <section class="content" id="view"></section>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
