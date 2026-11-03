@@ -893,3 +893,55 @@ def bind_ports(text: str) -> dict[str, str]:
                         p = a.rsplit(":", 1)[-1]
                         out[p] = f"{s.kind} {s.name}"
     return out
+
+
+def server_flags(text: str) -> dict[str, dict]:
+    """'backend/server' → {disabled, weight} for every server line in backends/listens (for 'kept' marks)."""
+    out = {}
+    lines = text.split("\n")
+    for s in sections(lines):
+        if s.kind not in ("backend", "listen"):
+            continue
+        for l in lines[s.start + 1:s.end]:
+            t = _norm(l)
+            if len(t) >= 3 and t[0] == "server":
+                w = t[t.index("weight") + 1] if "weight" in t[:-1] else ""
+                out[f"{s.name}/{t[1]}"] = {"disabled": "disabled" in t[3:], "weight": w}
+    return out
+
+
+def set_server_flags(text: str, backend: str, server: str, *, disabled: bool | None = None,
+                     weight: str | None = None) -> str:
+    """Change only `disabled` and/or `weight` on one server line, keeping everything else as written.
+    weight="" removes the weight option (HAProxy's default, 1)."""
+    lines = text.split("\n")
+    for s in sections(lines):
+        if s.kind not in ("backend", "listen") or s.name != backend:
+            continue
+        for i in range(s.start + 1, s.end):
+            body, comment = _strip_comment(lines[i])
+            t = body.split()
+            if len(t) < 3 or t[0] != "server" or t[1] != server:
+                continue
+            indent = body[:len(body) - len(body.lstrip())]
+            head, opts = t[:3], t[3:]
+            if disabled is not None:
+                opts = [o for o in opts if o != "disabled"]
+                if disabled:
+                    opts.append("disabled")
+            if weight is not None:
+                _check(weight == "" or (weight.isdigit() and int(weight) <= 256), "weight must be 0-256")
+                if "weight" in opts[:-1]:
+                    j = opts.index("weight")
+                    if weight == "":
+                        del opts[j:j + 2]
+                    else:
+                        opts[j + 1] = weight
+                elif weight != "":
+                    k = opts.index("disabled") if "disabled" in opts else len(opts)
+                    opts[k:k] = ["weight", weight]
+            gap = lines[i][len(body):len(lines[i]) - len(comment)] if comment else ""
+            lines[i] = indent + " ".join(head + opts) + gap + comment
+            return "\n".join(lines)
+        raise CfgError(f"server {server} not found in {backend}")
+    raise CfgError(f"backend {backend} not found")
