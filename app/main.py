@@ -4,8 +4,10 @@ api_alerts.py and api_admin.py."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
+import shlex
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,7 +35,7 @@ from .vault import Vault, VaultError
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger("gwconsole")
-OPEN_PATHS = {"/api/login"}
+OPEN_PATHS = {"/api/login", "/api/health"}
 MUST_CHANGE_OK = {"/api/me", "/api/account/password", "/api/logout"}
 
 
@@ -102,6 +104,20 @@ async def index():
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/prepare-node.sh")
+async def prepare_script():
+    """The node setup script, so a node can run: curl -fsSL http://<dashboard>/prepare-node.sh | bash -s -- …
+    It holds no secrets (the dashboard's public key is passed as an argument)."""
+    from .api_admin import PREP_SCRIPT
+    return FileResponse(PREP_SCRIPT, media_type="text/x-shellscript")
+
+
+@app.get("/api/health")
+async def health():
+    """Unauthenticated liveness probe (install.sh waits on it). Says nothing about nodes."""
+    return {"ok": True, "version": __version__}
+
+
 @app.post("/api/login")
 async def login(request: Request, body: dict = Body(...)):
     addr = ip(request)
@@ -134,7 +150,9 @@ async def logout(request: Request):
 @app.get("/api/me")
 async def me(request: Request):
     u = user(request)
-    return {"user": u["username"], "role": u["role"], "must_change": u["must_change"], "version": __version__}
+    from .api_admin import setup_pending
+    return {"user": u["username"], "role": u["role"], "must_change": u["must_change"], "version": __version__,
+            "setup": u["role"] == "superadmin" and setup_pending()}
 
 
 @app.get("/api/inventory")
@@ -194,6 +212,53 @@ async def hp_service(request: Request, node: str, body: dict = Body(...)):
     r = await haproxy.service_action(st.pool, st.s.haproxy(node), action)
     audit(request, f"haproxy {action}", node, r["ok"], r["output"])
     return r
+
+
+INSTALL_SOCAT = ("command -v socat >/dev/null && echo 'socat: present' || { "
+                 "if command -v apt-get >/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y -qq socat >/dev/null; "
+                 "elif command -v dnf >/dev/null; then dnf install -y -q socat >/dev/null; "
+                 "else yum install -y -q socat >/dev/null; fi && echo 'socat: installed' || echo 'socat: install failed'; }")
+
+
+@app.post("/api/haproxy/{node}/fix-socket")
+@shielded
+async def hp_fix_socket(request: Request, node: str):
+    """Add (or raise to level admin) the stats socket in haproxy.cfg's global section and install
+    socat, using the normal safe apply: validate → backup → write → reload → rollback on failure."""
+    need(request, "operator")
+    n = st.s.haproxy(node)
+    tg = haproxy.HAProxyConfig(st.pool, st.s, n)
+    steps = []
+    async with _lock(node):
+        r = await st.pool.run(n, INSTALL_SOCAT, timeout=180, critical=True)
+        steps.append(r.out.strip() or r.text)
+        cur = await tg.read()
+        new, sock, what = haproxy.ensure_admin_socket(cur, n.stats_socket)
+        res = {"ok": True, "stage": "noop"}
+        if what == "ok":
+            steps.append(f"stats socket {sock} is already level admin")
+        else:
+            await st.pool.run(n, f"mkdir -p {shlex.quote(str(Path(sock).parent))}")
+            res = await tg.apply(new, configops.sha(cur))
+            steps.append({"applied": f"✔ {'added' if what == 'added' else 'raised to level admin'}: stats socket {sock} "
+                                     f"(backup {res.get('backup')}) and reloaded HAProxy",
+                          "validate": "✘ haproxy -c rejected the change — nothing changed",
+                          "rolled_back": "✘ HAProxy failed to reload — rolled back",
+                          "conflict": "✘ haproxy.cfg changed meanwhile — try again"}.get(res["stage"], res["stage"]))
+            if not res["ok"]:
+                steps.append(res.get("output", ""))
+        if res["ok"]:
+            await asyncio.sleep(1)
+            chk = await st.pool.run(n, f"test -S {shlex.quote(sock)}")
+            steps.append(f"✔ socket {sock} is up" if chk.ok else f"⚠ {sock} not present yet — check 'systemctl status {n.service}'")
+            if sock != n.stats_socket and chk.ok:
+                st.store.save_node("haproxy", dataclasses.replace(n, stats_socket=sock), old_name=n.name)
+                await st.reload()
+                steps.append(f"✔ node setting updated: stats socket = {sock}")
+    ok = res["ok"]
+    out = "\n".join(x for x in steps if x)
+    audit(request, "haproxy fix-socket", node, ok, f"stage={res['stage']} backup={res.get('backup')}\n{out}")
+    return {"ok": ok, "output": out}
 
 
 @app.get("/api/haproxy/{node}/logs")
