@@ -4,6 +4,8 @@ All notable changes to Gateway Console. Versions follow [Semantic Versioning](ht
 MAJOR for breaking config/install changes, MINOR for new features, PATCH for fixes.
 
 ## [Unreleased]
+
+## [1.4.0] - 2026-11-04
 ### Added
 - **Monitoring page.** Every public hostname is found automatically from your tunnels and HAProxy host
   rules and checked every minute, publicly (through Cloudflare) and internally (straight to the origin
@@ -189,6 +191,7 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
   rule tester; config editor with validate → diff → backup → apply → health check → auto-rollback;
   audit log; scrypt login; SSH key access with `from=` restriction; installer and node prep script.
 
-[Unreleased]: ../../compare/v1.2.0...HEAD
+[Unreleased]: ../../compare/v1.4.0...HEAD
+[1.4.0]: ../../compare/v1.3.0...v1.4.0
 [1.2.0]: ../../compare/v1.1.0...v1.2.0
 [1.1.0]: ../../releases/tag/v1.1.0
