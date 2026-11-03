@@ -4,6 +4,55 @@ All notable changes to Gateway Console. Versions follow [Semantic Versioning](ht
 MAJOR for breaking config/install changes, MINOR for new features, PATCH for fixes.
 
 ## [Unreleased]
+### Added
+- **Monitoring page.** Every public hostname is found automatically from your tunnels and HAProxy host
+  rules and checked every minute, publicly (through Cloudflare) and internally (straight to the origin
+  with the right Host header; TCP services get a port check). Response time, uptime for 24 hours and
+  7 days, certificate expiry, and per-site options: path, expected status, a word the page must
+  contain, slow limit, and "Don't check this site". Add your own checks with "+ Add a check".
+- **Server health.** CPU load, memory, the fullest disk and uptime for every node, read over SSH.
+  **Watched services**: pick systemd services per server; a stopped one raises an alert and operators
+  get a Restart button.
+- **"Server" node type** for hosts without HAProxy or cloudflared (web, database, cache, game servers):
+  health and watched services only. Added the same way as other nodes (password once, or the command).
+- **Graphs** over 1 hour / 6 hours / 24 hours / 7 days: response time per site, memory, CPU load and disk
+  per server, requests and 5xx per HAProxy backend, connections. Drawn in the page with no outside
+  libraries.
+- **Traffic page.** Per site from Cloudflare: requests, visits and unique visitors, bandwidth, share
+  served from Cloudflare's cache, 4xx/5xx, threats blocked and top countries. Per HAProxy frontend and
+  backend: requests, data, 4xx/5xx and busiest hour, including internal and TCP traffic. Today /
+  7 days / 30 days / 12 months, change vs the previous period, stacked chart and CSV export. Kept for a
+  year. Needs the token permission **Zone → Analytics → Read** (Settings → Cloudflare → Test shows it).
+- **New alerts:** site down (3 failed checks in a row) and slow, backend 5xx share, disk 80 % / 90 %,
+  memory 95 %, CPU load above 2× cores for 10 minutes, watched service stopped, certificate expiring
+  in 14 / 3 days (HAProxy .pem files on the node and the public certificate), server unreachable.
+- **Weekly summary** to Telegram/Discord (Monday 09:00 by default): uptime per site, incidents and the
+  longest outage, busiest sites, the backend with the most 5xx, disks filling up. "Send one now" to try it.
+- **Settings → Monitoring:** check intervals, down/slow rules, alert thresholds, how long history is
+  kept (with the database size), weekly summary day, time and channels, and sites not to check.
+- **Drain / maintenance kept after a restart.** On the HAProxy page they are now also written into
+  haproxy.cfg (`disabled` / `weight 0`, remembering the original weight) without a reload; "ready"
+  undoes it. A 📌 shows a kept state, and a warning shows when the running state and the file disagree.
+  Untick "Keep after restart" for a runtime-only change.
+- **Version history** in Settings → About & updates: every release with its notes (Added / Changed /
+  Fixed), and **Update history**: each upgrade on this dashboard, who ran it, how long it took and
+  whether it rolled back. Option to switch off the "new version" message.
+- Orphan DNS records on a tunnel can be deleted, or turned into a hostname, from the CF Tunnels page.
+
+### Changed
+- **Tunnels is now "CF Tunnels"**, above HAProxy in the menu, and redesigned: a summary row, a
+  searchable tunnel list with a "Needs attention" filter, and a detail panel showing each hostname's
+  full route (cloudflared → HAProxy frontend → backend → servers up), its DNS state with Fix / Create
+  route, and whether the site is up. A new **Hostnames** tab lists every public hostname end to end,
+  with CSV export. Tunnels found in Cloudflare but run elsewhere fold away at the bottom.
+- The menu is now Overview, Monitoring, Traffic, CF Tunnels, HAProxy, Alerts, Activity, Settings.
+- **Settings are grouped** into Access (Users & sessions, Sign-in security), Connections (Nodes,
+  Cloudflare accounts), Alerts (Notifications, Monitoring) and System (General, Backups, Config history,
+  About & updates). Sign-in security and Config history have their own pages. Old links still work.
+- **About & updates redesigned:** a version card (installed when and by whom, previous version kept for
+  rollback, host), and a check-for-updates box showing the new version's notes and the steps an update
+  takes.
+- Settings → Cloudflare → Test also checks the Analytics permission.
 
 ## [1.3.0] - 2026-11-03
 ### Added
