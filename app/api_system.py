@@ -166,9 +166,12 @@ def record_running_version():
             prev = "an earlier version" if old else None
         if prev:
             st.store.put("updated_from", {"from": prev, "to": __version__, "at": int(time.time())})
+        hs = helper_status()        # started from Settings → About (or nightly): credit who asked for it
+        by = (hs.get("by") if str(hs.get("target", "")).lstrip("v") == __version__
+              and time.time() - int(hs.get("started_at") or 0) < 1800 else None) or "installer"
         st.store.db.x("INSERT INTO update_history (at, kind, from_v, to_v, by, result) VALUES (?,?,?,?,?,?)",
                       (int(time.time()), "upgrade" if prev else "install",
-                       prev if prev and prev[0].isdigit() else None, __version__, "installer", "done"))
+                       prev if prev and prev[0].isdigit() else None, __version__, by, "done"))
         st.store.put("running_version", __version__)
 
 
