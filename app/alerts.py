@@ -10,6 +10,8 @@ Alerts whose scope could not be checked (node unreachable, CF API failing) are l
 as they are instead of being resolved. Changes are passed to Telegram / Discord.
 Every DRIFT_EVERY seconds it also checks managed config files for changes made outside the
 dashboard (history.check_drift), and it announces newly available dashboard versions.
+Monitoring alerts (sites, servers, services, certificates, 5xx) come from monitor.Monitor, which
+also gets each round's HAProxy counters for the traffic history.
 """
 from __future__ import annotations
 
@@ -81,6 +83,12 @@ class Engine:
             hp, tun = await collect_all()
             current, unknown = build_alerts(hp, tun, bool(st.s.cf_accounts))
             current += await self.drift_alerts()
+            mon = getattr(st, "monitor", None)
+            if mon:
+                mon.record_haproxy(hp)
+                m_alerts, m_unknown = mon.alerts()
+                current += m_alerts
+                unknown["nodes"] |= m_unknown
             changes = self.process(current, unknown, int(time.time()))
             self.last_run = int(time.time())
             self.last_error = ""
@@ -205,21 +213,23 @@ class Engine:
         latest, cur = s.get("latest"), s.get("current")
         if not latest or latest == cur or st.store.get("update_notified") == latest:
             return
+        if not st.store.general().get("update_notify", True):
+            return
         st.store.put("update_notified", latest)
         url = st.s.dashboard_url
         await self.announce(f"Gateway Console {latest} is available (you have {cur}). "
                             f"Open Settings → About to see what's new and update{(' — ' + url + '/#/settings/about') if url else ''}.")
 
-    async def announce(self, text: str):
+    async def announce(self, text: str, channels: list[str] | None = None, icon: str = "ℹ️"):
         """Send a one-off message to every enabled channel (no severity filter)."""
         cfg = st.store.notify_cfg()
         for ch in ("telegram", "discord"):
             c = cfg[ch]
-            if not c.get("enabled"):
+            if not c.get("enabled") or (channels is not None and ch not in channels):
                 continue
             try:
                 body = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") if ch == "telegram" else text
-                await self.send(ch, c, ("ℹ️ " if ch == "telegram" else "ℹ️ ") + body)
+                await self.send(ch, c, f"{icon} {body}")
             except Exception as e:
                 log.warning("announcement via %s failed: %s", ch, e)
 
