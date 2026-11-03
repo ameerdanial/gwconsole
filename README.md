@@ -2,8 +2,9 @@
 
 One web UI to watch **and** manage your HAProxy and cloudflared gateways.
 It runs on any small Linux host (VM, LXC or bare metal) and talks to the gateway nodes over SSH (key auth, no agents),
-plus the Cloudflare API for edge health and DNS routes. A background checker records
-every alert and can message you on Telegram or Discord.
+plus the Cloudflare API for edge health, DNS routes and traffic numbers. It also watches your sites and
+your other servers (uptime, response time, CPU, memory, disks, services, certificates), records every
+alert and can message you on Telegram or Discord.
 
 ```
             browser ──HTTP:8088──▶  gwconsole host ──▶ Telegram / Discord (alerts)
@@ -23,11 +24,13 @@ every alert and can message you on Telegram or Discord.
 | Page | See | Do |
 |---|---|---|
 | **Overview** | KPIs, active alerts, node and tunnel cards | — |
-| **HAProxy** | Six status tiles (service, backends, connections, rates, traffic, version), then every frontend, backend and server with check status, sessions, rates, bytes, 2xx/4xx/5xx | **+ Add** a site or TCP service, **Edit / Delete** any frontend or backend, add/remove servers, server **ready / drain / maint**, **reload** (config-checked first), restart, logs, **Edit config** |
-| **Tunnels** | Every cloudflared service on the node (auto-discovered): local state, Cloudflare edge status, connections, ingress rules, DNS status per hostname, orphan DNS records, tunnels in your accounts that run nowhere you manage | **New tunnel**, **delete tunnel**, **add / remove hostname**, start / stop / restart, logs, rule tester, create/fix DNS route, **Edit config** |
+| **Monitoring** | Every public hostname checked every minute, publicly (through Cloudflare) and internally (straight to the origin): status, response time, uptime 24 h / 7 days, certificate expiry. Every server's CPU load, memory, fullest disk, uptime and watched services. Graphs over 1 h – 7 days | **+ Add a check**, per-site options (path, expected status, keyword, slow limit, don't check), watch a service, **Restart** a stopped one, check now |
+| **Traffic** | Per site from Cloudflare: requests, visitors, bandwidth, cache share, 4xx/5xx, threats, countries. Per HAProxy frontend/backend: requests, data, 4xx/5xx, busiest hour. Today / 7 / 30 days / 12 months vs the previous period | Export CSV, refresh from Cloudflare |
+| **CF Tunnels** | Every cloudflared tunnel (auto-discovered) with its edge connections, hostnames and today's requests; a detail panel shows each hostname's full route (cloudflared → HAProxy frontend → backend → servers up), its DNS state and whether the site is up. A **Hostnames** tab lists every public hostname end to end. Tunnels in your accounts that run nowhere you manage | **New tunnel**, **delete tunnel**, **add / remove hostname**, start / stop / restart, logs, test a URL, create/fix DNS route, delete orphan DNS records, **Edit config**, export CSV |
+| **HAProxy** | Six status tiles (service, backends, connections, rates, traffic, version), then every frontend, backend and server with check status, sessions, rates, bytes, 2xx/4xx/5xx | **+ Add** a site or TCP service, **Edit / Delete** any frontend or backend, add/remove servers, server **ready / drain / maint** (kept after a restart), **reload** (config-checked first), restart, logs, **Edit config** |
 | **Alerts** | Active and past alerts: what, when it started, how long it lasted, who acknowledged it | Acknowledge, mute an alert or a whole node, export CSV, check now |
 | **Activity** | Audit log of every change (who, what, result, output) | — |
-| **Settings** | Users, sessions, Cloudflare accounts, nodes, notifications, backups, general, about & updates (superadmin only) | Everything that used to be in config files, plus **updating the dashboard**, **backups**, **config history** |
+| **Settings** | Access (users & sessions, sign-in security), Connections (nodes, Cloudflare accounts), Alerts (notifications, monitoring), System (general, backups, config history, about & updates) — superadmin only | Everything that used to be in config files, plus **updating the dashboard**, **backups**, **monitoring thresholds** |
 
 ### Adding sites and editing HAProxy (no config typing)
 **+ Add** on the HAProxy page opens one form for both halves of HAProxy:
@@ -87,11 +90,36 @@ A background checker runs every 30 s (configurable), even with no browser open.
 | See all pages, logs, alerts, configs (read-only) | ✔ | ✔ | ✔ |
 | Acknowledge / mute alerts | | ✔ | ✔ |
 | Server state, reload/restart, edit configs, tunnels, hostnames, DNS routes | | ✔ | ✔ |
-| Users, Cloudflare accounts, nodes, notifications, settings | | | ✔ |
+| Site checks and their options, watched services, restart a stopped watched service | | ✔ | ✔ |
+| Users, Cloudflare accounts, nodes, notifications, monitoring thresholds, settings | | | ✔ |
 
 New users and password resets get a temporary password that must be changed at first sign-in. Superadmins can see every signed-in session and revoke it. The last active superadmin can't be demoted, disabled or deleted.
 
+### Monitoring
+![Monitoring](docs/monitoring.png)
+
+- **Sites** are found automatically from your tunnels' hostnames and your HAProxy host rules; add others with **+ Add a check**. Each one is checked every minute (Settings → Monitoring):
+  - **public**: `https://hostname/` through Cloudflare, like a visitor;
+  - **internal**: the tunnel's origin (e.g. `http://10.0.10.21:8080`) with the hostname as Host header, so you can tell "HAProxy is fine, Cloudflare isn't" from "the backend is down". TCP services (e.g. Minecraft) get a port check.
+  - A site is **down** after 3 failed checks in a row and **slow** above 1.5 s (both adjustable, also per site). The public certificate's expiry is checked hourly.
+- **Servers**: every node, including the new **Server** type for hosts that run neither HAProxy nor cloudflared (web, database, cache, game servers). Add them in Settings → Nodes like any other node; nothing gets installed on them. CPU load, memory, fullest disk and uptime are read over SSH every minute.
+- **Watched services**: **+ service** on a server row picks systemd services to watch (it suggests what's running). A stopped one raises a critical alert and operators get a **Restart** button.
+- **Alerts** (with mute, acknowledge and notifications like the others): site down / slow, backend 5xx share above 5 % for 5 min, disk 80 % / 90 %, memory 95 %, CPU load above 2× cores for 10 min, watched service stopped, certificate expiring in 14 / 3 days (HAProxy `.pem` files and public certificates), server unreachable.
+- **Weekly summary** to Telegram/Discord (Monday 09:00 by default): uptime per site, incidents and the longest outage, busiest sites, the backend with the most 5xx, disks filling up.
+- **History**: every minute for 48 hours, 15-minute averages for 30 days, daily traffic totals for a year — a few tens of MB in the same SQLite database.
+
+### Traffic
+![Traffic](docs/traffic.png)
+
+**By site** comes from Cloudflare's analytics (only traffic through Cloudflare); it needs the token permission **Zone → Analytics → Read** (see the token table below). **By frontend / backend** comes from HAProxy's own counters, so it also counts internal traffic and TCP connections, and keeps counting across reloads and restarts. Numbers start building up from the moment 1.4 runs; Cloudflare's last week is fetched on the first run.
+
 ### Managing tunnels
+![CF Tunnels](docs/tunnels.png)
+
+The **Hostnames** tab shows every public hostname end to end: DNS → tunnel → where cloudflared sends it → HAProxy frontend → backend → servers up → site status → today's requests.
+
+![Hostnames](docs/cf-hostnames.png)
+
 **New tunnel** (button on each cloudflared node): name, Cloudflare account, and optionally a first hostname and origin. The dashboard creates the tunnel through the Cloudflare API, writes the credentials (600) and `config.yml`, installs `cloudflared-<name>.service`, enables it, checks it is active and creates the DNS record. If anything fails, all of it is undone.
 
 **+ Hostname / Remove** edits the ingress list (keeping your comments and indentation) through the safe-apply pipeline, and can create or delete the DNS record. It never repoints a record that belongs to another tunnel; that needs the explicit **Fix route** button.
@@ -100,11 +128,16 @@ New users and password resets get a temporary password that must be changed at f
 
 **Token-run tunnels** (`cloudflared tunnel run --token …`) are detected and can be started, stopped or deleted; their hostnames live in the Zero Trust dashboard.
 
+**Orphan DNS records** (pointing at a tunnel that has no rule for them) can be deleted, or turned into a hostname, from the tunnel's panel.
+
+### Server state that survives a restart
+On the HAProxy page, **drain** and **maint** are also written into `haproxy.cfg` (`weight 0` / `disabled`, the original weight is remembered) without a reload, so a later reload or restart doesn't bring the server back by surprise; **ready** undoes it. 📌 marks a kept state, and "file says …" warns when the running state and the file disagree. Untick **Keep after restart** in the confirmation for a runtime-only change.
+
 ### Updates, backups and config history
-- **Update from the dashboard** (Settings → About & updates): a nightly check (or **Check for updates**) lists new versions with their changelog. **Update now** backs up, installs, restarts and checks that the new version answers; if it doesn't, it **goes back to the previous version automatically**. Telegram/Discord tell you when a new version is out. You can let bug-fix releases (x.y.**Z**) install themselves.
-- **What's new**: after an update everyone sees a one-time banner with the changes.
+- **Update from the dashboard** (Settings → About & updates): a nightly check (or **Check now**) shows the new version's notes and the steps an update takes. **Update now** backs up, installs, restarts and checks that the new version answers; if it doesn't, it **goes back to the previous version automatically**. Telegram/Discord tell you when a new version is out. You can let bug-fix releases (x.y.**Z**) install themselves.
+- **What's new**: after an update everyone sees a one-time banner with the changes. **Version history** lists every release with its notes, and **Update history** every upgrade on this dashboard (who, how long, rolled back or not).
 - **Backups** (Settings → Backups): every night (the last 14 are kept) and before every update — settings, keys, users, nodes, accounts and alerts. Optionally copied to one of your nodes over SSH. **Download** gives a passphrase-encrypted file. Restore with `gwconsole restore <file>`.
-- **Config history**: every change to `haproxy.cfg` and tunnel configs is also committed to a local git history, with who made it. If someone edits a file **outside the dashboard** (over SSH), you get an alert within 15 minutes; it's recorded in the history and you **Accept change** on the Alerts page.
+- **Config history** (Settings → Config history): every change to `haproxy.cfg` and tunnel configs is also committed to a local git history, with who made it. If someone edits a file **outside the dashboard** (over SSH), you get an alert within 15 minutes; it's recorded in the history and you **Accept change** on the Alerts page.
 - **Node software**: cloudflared on each node against the latest Cloudflare release, HAProxy against your OS packages. **Update cloudflared** restarts the tunnels one at a time and goes back to the old version if a tunnel doesn't come back.
 - **Sign-in security**: a message when someone signs in from a new address or an address gets locked out, and an optional list of networks allowed to sign in.
 
@@ -130,7 +163,7 @@ Host github-gwconsole
   IdentitiesOnly yes
 EOF
 git clone github-gwconsole:ameerdanial/gwconsole.git /root/gwconsole
-cd /root/gwconsole && git checkout v1.3.0      # a tagged release
+cd /root/gwconsole && git checkout v1.4.0      # a tagged release
 ```
 
 ### 2. Run the installer
@@ -184,6 +217,7 @@ Saving runs a connection test. If an HAProxy node's admin socket goes missing la
 | Account · Cloudflare Tunnel | **Edit** (Read if you only want to watch) |
 | Zone · Zone | Read |
 | Zone · DNS | **Edit** (Read if you never create/fix/delete routes) |
+| Zone · Analytics | Read (for the Traffic page) |
 
 Tunnels are matched to their account automatically by the `tunnel:` ID in each `config.yml`.
 
@@ -238,7 +272,8 @@ Where things live:
 | Config backups on the nodes | `/etc/haproxy/gwc-backups/`, `/root/.cloudflared/<tunnel>/gwc-backups/` |
 | Dashboard backups (nightly, before updates/restores) | `/var/backups/gwconsole/` |
 | Config history (git) | `/var/lib/gwconsole/config-history/` — `git log -p` works there |
-| Update helper state and log | `/var/lib/gwconsole-helper/` (written by root, read by the dashboard) |
+| Update helper state, log and update history | `/var/lib/gwconsole-helper/` (written by root, read by the dashboard) |
+| Monitoring history and traffic numbers | in the database (tables `samples`, `samples_15m`, `traffic_daily`); retention in Settings → Monitoring |
 
 ## Version control & releases
 
