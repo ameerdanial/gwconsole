@@ -27,7 +27,7 @@ PAGES.haproxy = {
         <div class="grow"></div><input type="search" id="hpFilter" placeholder="Filter backends / servers…" value="${esc(S.cache.hpFilter || "")}"></div>
       <div class="panel" id="hpHead"><div class="empty">Loading…</div></div>
       <div class="panel"><div class="hd"><h2>Frontends</h2></div><div class="bd flush tbl-wrap" id="hpFe"></div></div>
-      <div class="panel"><div class="hd"><h2>Backends & servers</h2><span class="meta">State changes are runtime-only (lost on restart). Use Edit config to make them permanent.</span></div><div class="bd flush tbl-wrap" id="hpBe"></div></div>`;
+      <div class="panel"><div class="hd"><h2>Backends & servers</h2><span class="meta">Drain and maintenance are kept after a restart (saved in haproxy.cfg, no reload) unless you untick it · 📌 = kept</span></div><div class="bd flush tbl-wrap" id="hpBe"></div></div>`;
     v.addEventListener("click", (e) => this.onClick(e));
     $("#hpFilter").addEventListener("input", (e) => { S.cache.hpFilter = e.target.value; if (S.cache.hp) this.renderBe(S.cache.hp); });
   },
@@ -95,11 +95,13 @@ PAGES.haproxy = {
         servers.map((s) => {
           const st = s.status.includes("MAINT") ? "maint" : s.status === "DRAIN" || s.status.includes("DRAIN") ? "drain" : "ready";
           return `<tr><td style="padding-left:28px">${esc(s.name)}${s.backup ? ` <span class="tag">backup</span>` : ""}<div class="sub mono">${esc(s.addr)}</div></td>
-            <td>${pill(srvClass(s.status), s.status)}</td>
+            <td>${pill(srvClass(s.status), s.status)}${s.kept ? `<span class="kept" title="Kept after restart: haproxy.cfg has ${s.kept === "maint" ? "'disabled'" : "'weight 0'"} on this server">📌</span>` : ""}
+              ${s.kept && s.kept !== st ? `<div><span class="pill mis" title="Running state and haproxy.cfg disagree — after a reload it goes back to ${s.kept}">file says ${esc(s.kept)}</span></div>` : ""}
+              ${!s.kept && st !== "ready" && s.kept !== undefined ? `<div class="sub">until restart</div>` : ""}</td>
             <td><span class="mono small">${esc(s.check_status || "–")}</span>${s.check_duration != null ? ` <span class="sub">${s.check_duration}ms</span>` : ""}<div class="sub">${esc(s.check_desc || "")}</div></td>
             <td class="sub">changed ${fmt.dur(s.lastchg)} ago${s.chkfail ? ` · ${s.chkfail} fails` : ""}</td>
             <td class="num">${fmt.n(s.scur)}</td><td class="num">${fmt.n(s.rate)}</td><td class="num">${fmt.bytes(s.bin)} / ${fmt.bytes(s.bout)}</td><td class="num">${fmt.n(s.hrsp_5xx)}</td>
-            <td><div class="row" style="flex-wrap:nowrap;gap:6px;justify-content:flex-end"><div class="seg op">${["ready", "drain", "maint"].map((x) => `<button class="${x} ${st === x ? "on" : ""}" data-act="srv" data-be="${esc(b.name)}" data-srv="${esc(s.name)}" data-st="${x}">${x}</button>`).join("")}</div>
+            <td><div class="row" style="flex-wrap:nowrap;gap:6px;justify-content:flex-end"><div class="seg op">${["ready", "drain", "maint"].map((x) => `<button class="${x} ${st === x ? "on" : ""}" data-act="srv" data-be="${esc(b.name)}" data-srv="${esc(s.name)}" data-st="${x}" data-kept="${esc(s.kept || "")}">${x}</button>`).join("")}</div>
               <button class="ib rm op" title="Remove ${esc(s.name)} from haproxy.cfg" data-act="rm-srv" data-be="${esc(b.name)}" data-srv="${esc(s.name)}">✕</button></div></td></tr>`;
         }).join("");
     }).join("");
@@ -143,15 +145,26 @@ PAGES.haproxy = {
       catch (err) { toast(err.message, "bad"); } finally { busy(b, false); refresh(); }
     }
     if (b.dataset.act === "srv") {
-      if (b.classList.contains("on")) return;
-      const { be, srv, st } = b.dataset;
-      if (st !== "ready") {
-        const ok = await confirmBox(`Set ${be}/${srv} to ${st.toUpperCase()}?`,
-          st === "drain" ? "<p>Stops new connections to this server; existing sessions finish normally.</p>" : "<p>Takes the server out of rotation immediately (maintenance). Health checks stop.</p>",
-          `Set ${st}`, st === "maint" ? "danger" : "pri");
+      const { be, srv, st, kept } = b.dataset;
+      if (b.classList.contains("on") && (kept || "ready") === st) return;
+      let keep = true;
+      const what = st === "drain" ? "<p>Stops new connections to this server; existing sessions finish normally.</p>"
+        : st === "maint" ? "<p>Takes the server out of rotation immediately (maintenance). Health checks stop.</p>"
+        : "<p>Puts the server back into rotation.</p>";
+      const tick = st === "ready" ? (kept ? `<label class="check"><input type="checkbox" data-keep checked> Also remove the kept ${esc(kept)} from haproxy.cfg (no reload)</label>` : "")
+        : `<label class="check"><input type="checkbox" data-keep checked> Keep after restart — save it in haproxy.cfg as <code>${st === "maint" ? "disabled" : "weight 0"}</code> (no reload)</label>`;
+      if (st !== "ready" || kept) {
+        const ok = await modal({ title: st === "ready" ? `Set ${be}/${srv} to READY?` : `Set ${be}/${srv} to ${st.toUpperCase()}?`, size: "sm",
+          body: `${what}<div class="form" style="margin-top:8px">${tick}</div>`,
+          actions: [{ label: "Cancel", value: false }, { label: `Set ${st}`, cls: st === "maint" ? "danger" : "pri", value: true }],
+          onOpen: (bg) => bg.addEventListener("change", (ev) => { if (ev.target.matches("[data-keep]")) keep = ev.target.checked; }) });
         if (!ok) return;
+      } else keep = false;
+      try {
+        const r = await api(`/api/haproxy/${encodeURIComponent(node)}/server`, { body: { backend: be, server: srv, state: st, keep } });
+        toast(`${be}/${srv} → ${st}${keep && st !== "ready" ? " · kept after restart" : ""}`, "ok");
+        if (/already/.test(r.output || "")) toast(r.output, "");
       }
-      try { await api(`/api/haproxy/${encodeURIComponent(node)}/server`, { body: { backend: be, server: srv, state: st } }); toast(`${be}/${srv} → ${st}`, "ok"); }
       catch (err) { toast(err.message, "bad"); } finally { refresh(); }
     }
   },
