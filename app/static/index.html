@@ -1,4 +1,6 @@
 <!doctype html>
+<!-- Gateway Console web UI — page shell: login form, sidebar, header and the page container.
+     Scripts in js/ are loaded in order: core → editor → pages → app (starts the app). -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -22,16 +24,17 @@
     <aside class="side">
       <div class="brand">GW<b>//</b>CONSOLE<small>Gateway control</small></div>
       <nav class="nav" id="nav">
-        <a href="#/overview" data-p="overview">Overview <span class="count hidden" id="alertCount"></span></a>
+        <a href="#/overview" data-p="overview">Overview</a>
         <a href="#/haproxy" data-p="haproxy">HAProxy</a>
         <a href="#/tunnels" data-p="tunnels">Tunnels</a>
-        <a href="#/config" data-p="config">Config</a>
+        <a href="#/alerts" data-p="alerts">Alerts <span class="count hidden" id="alertCount"></span></a>
         <a href="#/activity" data-p="activity">Activity</a>
+        <a href="#/settings" data-p="settings" id="navSettings" class="hidden">Settings</a>
       </nav>
       <div class="foot">
-        <div>Signed in as <b id="who"></b></div>
+        <div>Signed in as <b id="who"></b> <span class="tag" id="whoRole"></span></div>
         <div class="ver" id="ver"></div>
-        <button class="btn sm" id="logout">Sign out</button>
+        <div class="row" style="margin-top:8px;gap:6px"><button class="btn sm grow" id="account">Password</button><button class="btn sm grow" id="logout">Sign out</button></div>
       </div>
     </aside>
     <main class="main">
@@ -51,6 +54,14 @@
   </div>
 
   <div class="toasts" id="toasts"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/js/core.js"></script>
+  <script src="/static/js/editor.js"></script>
+  <script src="/static/js/overview.js"></script>
+  <script src="/static/js/haproxy.js"></script>
+  <script src="/static/js/tunnels.js"></script>
+  <script src="/static/js/alerts.js"></script>
+  <script src="/static/js/activity.js"></script>
+  <script src="/static/js/settings.js"></script>
+  <script src="/static/js/app.js"></script>
 </body>
 </html>
