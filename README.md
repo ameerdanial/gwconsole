@@ -23,11 +23,35 @@ every alert and can message you on Telegram or Discord.
 | Page | See | Do |
 |---|---|---|
 | **Overview** | KPIs, active alerts, node and tunnel cards | — |
-| **HAProxy** | `show info` + `show stat`: frontends, backends, every server with check status, sessions, rates, bytes, 2xx/4xx/5xx | Server **ready / drain / maint**, **reload** (config-checked first), restart, logs, **Edit config** |
+| **HAProxy** | Six status tiles (service, backends, connections, rates, traffic, version), then every frontend, backend and server with check status, sessions, rates, bytes, 2xx/4xx/5xx | **+ Add** a site or TCP service, **Edit / Delete** any frontend or backend, add/remove servers, server **ready / drain / maint**, **reload** (config-checked first), restart, logs, **Edit config** |
 | **Tunnels** | Every cloudflared service on the node (auto-discovered): local state, Cloudflare edge status, connections, ingress rules, DNS status per hostname, orphan DNS records, tunnels in your accounts that run nowhere you manage | **New tunnel**, **delete tunnel**, **add / remove hostname**, start / stop / restart, logs, rule tester, create/fix DNS route, **Edit config** |
 | **Alerts** | Active and past alerts: what, when it started, how long it lasted, who acknowledged it | Acknowledge, mute an alert or a whole node, export CSV, check now |
 | **Activity** | Audit log of every change (who, what, result, output) | — |
-| **Settings** | Users, sessions, Cloudflare accounts, nodes, notifications, general (superadmin only) | Everything that used to be in config files |
+| **Settings** | Users, sessions, Cloudflare accounts, nodes, notifications, backups, general, about & updates (superadmin only) | Everything that used to be in config files, plus **updating the dashboard**, **backups**, **config history** |
+
+### Adding sites and editing HAProxy (no config typing)
+**+ Add** on the HAProxy page opens one form for both halves of HAProxy:
+
+- **Frontend** (where traffic comes in): *New*, *Use existing* or *None*.
+- **Backend** (the servers behind it): *New*, *Use existing* or *None*.
+- **Cloudflare** (optional): publish the hostname through a tunnel and create its DNS record, in the same step.
+
+Choose **Website (HTTP)** to route a hostname to new servers on your existing frontend, or **TCP service** (a game server, a database…) for its own port. Typing the hostname fills in the backend name, the Cloudflare hostname and where cloudflared should send it.
+
+Tabs cover what HAProxy can do without a wall of fields:
+
+| Frontend | Backend |
+|---|---|
+| **Routing**: Host / path (starts, ends, exact, regex) / header / source IP / method / TLS SNI → send to backend, redirect, redirect to HTTPS, deny, allow only from IPs, set header; reorder; default backend | **Servers**: address, weight, max conn, check, **backup (DR)**; per server: HTTPS to server, SNI, PROXY protocol, check interval / rise / fall, cookie, start disabled |
+| **Bind & HTTPS**: listen addresses, certificate, HTTP/2 (off by default — Cloudflare Tunnel already does TLS) | **Health check**: TCP connect or HTTP method / path / Host / healthy status |
+| **Headers & redirects**, **Limits & timeouts** (max conn, timeouts, rate limit per IP, logging) | **Headers**, **Timeouts & retries**, sticky sessions by cookie |
+| **Advanced** | **Advanced** |
+
+The right side updates as you type: **what will happen** in plain words, **checks** (name free, hostname not routed elsewhere, HTTP/TCP modes match, port free, each server reachable from the HAProxy node) and the **exact haproxy.cfg diff**. **Review diff & apply** runs `haproxy -c`, then the usual safe apply. If the Cloudflare step fails, the HAProxy change is undone too.
+
+**Edit** on any frontend or backend opens the same form with only that part. Anything the form has no field for stays in the **Advanced** tab exactly as written, and unchanged lines keep their exact formatting and position, so saving through the form never loses or reshuffles your config. **Delete** is refused while a backend is still used by a frontend. **+ server** and **✕** on a backend add or remove one server.
+
+![Add a site](docs/add-site.png)
 
 ### Config editor (side panel)
 **Edit config** on the HAProxy or Tunnels page slides the editor in over the live stats.
@@ -76,6 +100,16 @@ New users and password resets get a temporary password that must be changed at f
 
 **Token-run tunnels** (`cloudflared tunnel run --token …`) are detected and can be started, stopped or deleted; their hostnames live in the Zero Trust dashboard.
 
+### Updates, backups and config history
+- **Update from the dashboard** (Settings → About & updates): a nightly check (or **Check for updates**) lists new versions with their changelog. **Update now** backs up, installs, restarts and checks that the new version answers; if it doesn't, it **goes back to the previous version automatically**. Telegram/Discord tell you when a new version is out. You can let bug-fix releases (x.y.**Z**) install themselves.
+- **What's new**: after an update everyone sees a one-time banner with the changes.
+- **Backups** (Settings → Backups): every night (the last 14 are kept) and before every update — settings, keys, users, nodes, accounts and alerts. Optionally copied to one of your nodes over SSH. **Download** gives a passphrase-encrypted file. Restore with `gwconsole restore <file>`.
+- **Config history**: every change to `haproxy.cfg` and tunnel configs is also committed to a local git history, with who made it. If someone edits a file **outside the dashboard** (over SSH), you get an alert within 15 minutes; it's recorded in the history and you **Accept change** on the Alerts page.
+- **Node software**: cloudflared on each node against the latest Cloudflare release, HAProxy against your OS packages. **Update cloudflared** restarts the tunnels one at a time and goes back to the old version if a tunnel doesn't come back.
+- **Sign-in security**: a message when someone signs in from a new address or an address gets locked out, and an optional list of networks allowed to sign in.
+
+![About & updates](docs/about-updates.png)
+
 ## Install
 
 Any Linux host with **systemd** works — a VM, an LXC or bare metal: Debian 12+, Ubuntu 22.04+, or RHEL / Rocky / Alma / Fedora (Python 3.10+ is installed for you; 3.11 on RHEL 8/9). 1 vCPU and 512 MB is plenty. It only needs to reach the gateway nodes over SSH, and `api.cloudflare.com` if you use the Cloudflare features.
@@ -96,7 +130,7 @@ Host github-gwconsole
   IdentitiesOnly yes
 EOF
 git clone github-gwconsole:ameerdanial/gwconsole.git /root/gwconsole
-cd /root/gwconsole && git checkout v1.2.0      # a tagged release
+cd /root/gwconsole && git checkout v1.3.0      # a tagged release
 ```
 
 ### 2. Run the installer
@@ -161,6 +195,10 @@ Use **Send test**. The last step also saves the dashboard URL so each message li
 
 ## Upgrading
 
+From 1.3 on: **Settings → About & updates → Update now**. It needs the `gwconsole-helper` units that `install.sh` sets up (a small root service that only knows "check", "upgrade to a tag" and "back up").
+
+From the shell, or to get from 1.2 to 1.3 the first time:
+
 ```bash
 gwconsole upgrade            # fetch, show what's new, confirm, back up, upgrade, restart
 gwconsole upgrade v1.3.0     # a specific version
@@ -177,11 +215,14 @@ By hand it's the same: `cd /root/gwconsole && git fetch --tags --force && git ch
 
 ```bash
 gwconsole status                # version, service state and the URL to open
-gwconsole version               # installed version, e.g. "gwconsole 1.2.0 (v1.2.0)"
+gwconsole version               # installed version, e.g. "gwconsole 1.3.0 (v1.3.0)"
 gwconsole users                 # list users and roles
 gwconsole reset-password ameer  # locked out? set a new password (also re-enables the account)
 gwconsole create-admin <user>   # add another superadmin from the shell
 gwconsole check                 # test SSH to every node and every Cloudflare token
+gwconsole backup                # back up now (also nightly, automatically)
+gwconsole restore <file>        # put a backup back; asks for the passphrase of a downloaded .gwcbak
+gwconsole allow-all             # locked out by "allowed networks"? remove the restriction
 gwconsole logs | restart
 ```
 
@@ -195,7 +236,9 @@ Where things live:
 | Dashboard SSH key | `/etc/gwconsole/id_ed25519` |
 | Audit log | `/var/lib/gwconsole/audit.log` |
 | Config backups on the nodes | `/etc/haproxy/gwc-backups/`, `/root/.cloudflared/<tunnel>/gwc-backups/` |
-| Upgrade backups | `/var/backups/gwconsole/` |
+| Dashboard backups (nightly, before updates/restores) | `/var/backups/gwconsole/` |
+| Config history (git) | `/var/lib/gwconsole/config-history/` — `git log -p` works there |
+| Update helper state and log | `/var/lib/gwconsole-helper/` (written by root, read by the dashboard) |
 
 ## Version control & releases
 
@@ -222,6 +265,9 @@ Where things live:
 - "Use the node's password once" sends the password only over that pinned-host-key SSH session and keeps it in memory for that one request: it's never written to the database, logs or audit trail. A sudo password goes to `sudo` on stdin, never on a command line.
 - `/prepare-node.sh` and `/api/health` are the only addresses served without a login; neither holds anything secret (the public key is passed as an argument).
 - Cloudflare tokens, the Telegram bot token and the Discord webhook are encrypted in the database with `secret.key` (root:gwconsole 640). The app runs as the unprivileged `gwconsole` user in a hardened systemd unit.
+- Updating needs root, so the app can only *ask*: it writes one line (`check`, `upgrade vX.Y.Z` or `backup`, plus who asked) that the root helper validates against a fixed pattern, and it only installs version tags that exist in your repository. Nothing else the app writes is ever run as root.
+- **Allowed networks** (Settings → General) limits sign-in and every API call to the networks you list; the form refuses a list that would lock you out, and `gwconsole allow-all` on the host resets it.
+- Downloaded backups are encrypted (scrypt + AES-256-GCM) with a passphrase you choose; they contain `secret.key`.
 
 ## Files
 ```
@@ -233,6 +279,7 @@ install.sh            interactive installer / upgrader for the dashboard host (a
 prepare-node.sh       one-time setup on each managed node (also served by the dashboard)
 release.sh            cut a release (changelog, VERSION, tag)
 config.example.yaml   bootstrap config template
-gwconsole.service     systemd unit
+gwconsole.service     systemd unit for the dashboard
+systemd/              root helper (updates, backups) and the nightly timer
 VERSION · CHANGELOG.md · requirements.txt · requirements-dev.txt
 ```
