@@ -4,6 +4,7 @@
   python -m app check                  test SSH to every node and every Cloudflare token
   python -m app create-admin [user]    create a superadmin (first install / locked out)
   python -m app reset-password <user>  set a new password for a user
+      (both take --password-stdin to read the password from a pipe, used by install.sh)
   python -m app users                  list users and roles
   python -m app hashpw                 print a scrypt hash (for config.yaml, legacy)
   python -m app version                print the installed version
@@ -17,9 +18,12 @@ import sys
 
 def _ask_password() -> str:
     from .store import check_password_strength
-    pw = getpass.getpass("New password: ")
-    if pw != getpass.getpass("Repeat: "):
-        sys.exit("passwords do not match")
+    if "--password-stdin" in sys.argv:
+        pw = sys.stdin.readline().rstrip("\r\n")
+    else:
+        pw = getpass.getpass("New password: ")
+        if pw != getpass.getpass("Repeat: "):
+            sys.exit("passwords do not match")
     try:
         check_password_strength(pw)
     except ValueError as e:
@@ -41,8 +45,9 @@ def _store():
 
 
 def main():
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "serve"
-    arg = sys.argv[2] if len(sys.argv) > 2 else ""
+    args = [a for a in sys.argv[1:] if not a.startswith("--password-")]
+    cmd = args[0] if args else "serve"
+    arg = args[1] if len(args) > 1 else ""
     if cmd in ("version", "--version", "-V"):
         from . import __version__
         print(__version__)
@@ -52,7 +57,12 @@ def main():
     elif cmd == "create-admin":
         _, store = _store()
         name = arg or input("Username: ").strip()
-        store.create_user(name, _ask_password(), "superadmin", must_change=False)
+        if store.user(name):
+            sys.exit(f"user {name} already exists — use: gwconsole reset-password {name}")
+        try:
+            store.create_user(name, _ask_password(), "superadmin", must_change=False)
+        except ValueError as e:
+            sys.exit(str(e))
         print(f"superadmin {name} created")
     elif cmd == "reset-password":
         if not arg:
