@@ -193,3 +193,38 @@ class HAProxyConfig:
 
     async def read_backup(self, name: str) -> str:
         return await configops.read_backup(self.pool, self.n, self.n.backup_dir, self.prefix, name)
+
+
+# ---- admin stats socket ------------------------------------------------------
+_SECTION_RE = re.compile(r"^(global|defaults|frontend|backend|listen|peers|resolvers|userlist|program|"
+                         r"http-errors|ring|cache|mailers|log-forward|crt-store|traces)\b")
+_SOCK_RE = re.compile(r"^(\s*)stats\s+socket\s+(\S+)(.*)$")
+
+
+def ensure_admin_socket(text: str, default_path: str) -> tuple[str, str, str]:
+    """Make sure the global section has 'stats socket <path> ... level admin'.
+    Returns (new_text, socket_path, what) where what is 'ok', 'level' (existing socket raised to
+    level admin) or 'added' (new line inserted right after 'global')."""
+    lines = text.split("\n")
+    g_start = next((i for i, l in enumerate(lines) if re.match(r"^global\b", l)), None)
+    if g_start is None:
+        raise ValueError("haproxy.cfg has no 'global' section")
+    i = g_start + 1
+    while i < len(lines) and not _SECTION_RE.match(lines[i]):
+        m = _SOCK_RE.match(lines[i])
+        if m:
+            indent, path, rest = m.groups()
+            if re.search(r"\blevel\s+admin\b", rest):
+                return text, path, "ok"
+            comment = ""
+            if "#" in rest:
+                rest, comment = rest.split("#", 1)
+                comment = "  #" + comment
+            rest = re.sub(r"\s+level\s+\S+", "", rest).rstrip()
+            if not re.search(r"\bmode\s+\d+", rest):
+                rest += " mode 660"
+            lines[i] = f"{indent}stats socket {path}{rest} level admin{comment}"
+            return "\n".join(lines), path, "level"
+        i += 1
+    lines.insert(g_start + 1, f"    stats socket {default_path} mode 660 level admin")
+    return "\n".join(lines), default_path, "added"
