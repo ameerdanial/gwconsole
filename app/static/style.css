@@ -216,7 +216,7 @@ tr.dim td { color: var(--muted); }
 .form .sep { font-size: 12px; font-weight: 600; color: var(--text); border-top: 1px solid var(--line); padding-top: 12px; }
 .form .note { font-size: 12px; color: var(--muted); background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; line-height: 1.55; }
 .form details summary { cursor: pointer; color: var(--accent-2); font-size: 12.5px; }
-.form .ferr { color: var(--crit); font-size: 13px; min-height: 0; }
+.form .ferr { color: var(--crit); font-size: 13px; min-height: 0; white-space: pre-wrap; max-height: 260px; overflow: auto; }
 .form .ferr:empty { display: none; }
 .form input:invalid:not(:placeholder-shown) { border-color: rgba(255, 93, 108, .6); }
 @media (max-width: 760px) { .form .two { grid-template-columns: 1fr; } }
@@ -281,3 +281,22 @@ a.kpi:hover { border-color: var(--line-2); }
 }
 #setBody { display: flex; flex-direction: column; gap: 18px; }
 @media (max-width: 760px) { .toasts { left: 16px; right: 16px; } }
+
+/* ---- setup wizard ---- */
+.wizard { display: flex; flex-direction: column; gap: 14px; max-width: 980px; }
+.wsteps { list-style: none; margin: 0; padding: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.wsteps li { flex: 1 1 140px; }
+.wsteps a { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  color: var(--muted); text-decoration: none; background: var(--panel); font-weight: 600; font-size: 13px; }
+.wsteps .n { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); font-size: 12px; flex: none; }
+.wsteps li.on a { color: var(--text); border-color: var(--accent); }
+.wsteps li.on .n { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wsteps li.past a { color: var(--text); }
+.wsteps li.past .n { background: var(--ok); border-color: var(--ok); color: #fff; }
+.wnav { padding-top: 2px; }
+#wizBody, #wizNotify { display: flex; flex-direction: column; gap: 14px; }
+.wizard .checks li { grid-template-columns: 20px minmax(150px, auto) 1fr auto; align-items: center; }
+.wizard .checks li.wtest, .wizard .checks li.cfres { display: block; padding-left: 28px; }
+.wizard .checks li.cfres:empty { display: none; }
+.form .radios { display: flex; flex-direction: column; gap: 6px; }
