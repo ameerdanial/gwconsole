@@ -13,3 +13,4 @@ CI runs the same suite on Python 3.11, 3.12 and 3.13 for every push and pull req
 | `test_discovery.py` | Discovering cloudflared tunnels from systemd unit output |
 | `test_haproxy_parse.py` | Parsing HAProxy `show info` / `show stat` |
 | `test_core.py` | Version, password hashing, diffs, loading config.yaml |
+| `test_setup.py` | HAProxy admin-socket fixer, setup wizard API, public health/script endpoints, password-once input checks, `create-admin --password-stdin` |
