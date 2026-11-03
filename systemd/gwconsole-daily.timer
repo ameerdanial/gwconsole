@@ -1,0 +1,11 @@
+# When gwconsole-daily.service runs: every night around 03:30, catching up after downtime.
+[Unit]
+Description=Gateway Console nightly backup and update check
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
