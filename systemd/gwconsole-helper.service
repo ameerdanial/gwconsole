@@ -1,0 +1,9 @@
+# Runs one request from the dashboard as root: check for updates, install an update (with
+# automatic rollback) or make a backup. Only the actions in app/helper.py are accepted.
+[Unit]
+Description=Gateway Console helper (updates and backups)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gwconsole helper
+TimeoutStartSec=30min
