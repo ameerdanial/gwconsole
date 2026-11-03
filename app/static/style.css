@@ -1,3 +1,5 @@
+/* Gateway Console web UI — styling: dark theme tokens, layout, tables, forms, modals,
+   the config side panel, alerts and settings pages, and role-based hiding. */
 :root {
   --bg: #0a0b12;
   --bg-2: #10121c;
@@ -167,7 +169,7 @@ tr.dim td { color: var(--muted); }
 .modal .bd { padding: 16px 18px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
 .modal .ft { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
 .modal pre.log { font: 11.5px/1.5 var(--mono); margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #c9cde4; }
-.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 60; max-width: min(420px, calc(100vw - 32px)); }
+.toasts { position: fixed; left: 236px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 60; max-width: min(420px, calc(100vw - 32px)); }
 .toast { background: var(--panel-2); border: 1px solid var(--line-2); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; font-size: 13px; box-shadow: 0 8px 24px rgba(0, 0, 0, .4); overflow-wrap: anywhere; }
 .toast.ok { border-left-color: var(--ok); }
 .toast.bad { border-left-color: var(--crit); }
@@ -220,3 +222,62 @@ tr.dim td { color: var(--muted); }
 @media (max-width: 760px) { .form .two { grid-template-columns: 1fr; } }
 
 .side .foot .ver { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 2px; }
+
+
+/* ---------- roles: hide controls the signed-in role can't use ---------- */
+body[data-role=viewer] .op { display: none !important; }
+body:not([data-role=superadmin]) .sa { display: none !important; }
+
+/* ---------- config editor side panel ---------- */
+.drawer-bg { position: fixed; inset: 0; background: rgba(4, 5, 10, .45); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 40; }
+.drawer-bg.open { opacity: 1; pointer-events: auto; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(64vw, 980px); background: var(--panel); border-left: 1px solid var(--line-2);
+  box-shadow: -20px 0 50px rgba(0, 0, 0, .45); transform: translateX(102%); transition: transform .25s ease; z-index: 45; display: flex; flex-direction: column; }
+.drawer.open { transform: none; }
+.drawer .dhd { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.drawer .dhd h3 { margin: 2px 0 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawer .dbd { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 18px; }
+.drawer .editor { flex: 1; height: auto; min-height: 200px; }
+.drawer .out { max-height: 26vh; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); padding: 0 18px; }
+.tb { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 9px 12px; cursor: pointer; font-weight: 500; }
+.tb:hover { color: var(--text); }
+.tb.on { color: var(--text); border-bottom-color: var(--accent); }
+.hlist { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; flex: 0 0 auto; }
+.hi { flex: 0 0 auto; display: flex; flex-direction: column; gap: 2px; align-items: flex-start; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; font-size: 12.5px; cursor: pointer; color: var(--text); text-align: left; }
+.hi:hover { border-color: var(--line-2); }
+.hi.on { border-color: var(--accent); }
+.hdiff { flex: 1; min-height: 0; overflow: auto; }
+.hdiff .diff { max-height: none; }
+
+/* ---------- settings ---------- */
+.stabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.stabs a { color: var(--muted); padding: 9px 14px; border-bottom: 2px solid transparent; font-weight: 500; }
+.stabs a:hover { color: var(--text); }
+.stabs a.on { color: var(--text); border-bottom-color: var(--accent); }
+.checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.checks li { display: grid; grid-template-columns: 20px minmax(150px, auto) 1fr; gap: 8px; align-items: baseline; }
+.ck { font-weight: 700; }
+.ck.ok { color: var(--ok); }
+.ck.bad { color: var(--crit); }
+.help p { margin: 6px 0; color: var(--muted); }
+.help b { color: var(--text); }
+.mini-t { border-collapse: collapse; margin: 6px 0; width: auto; }
+.mini-t td { border: 1px solid var(--line); padding: 4px 10px; font-size: 12px; }
+.fp { font-size: 12.5px; padding: 8px 10px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 7px; overflow-wrap: anywhere; }
+.form-panel .bd.form { padding: 16px; }
+.form .sep:first-child { border-top: 0; padding-top: 0; }
+select.sm { padding: 3px 6px; font-size: 12px; }
+a.kpi { color: inherit; display: block; }
+a.kpi:hover { border-color: var(--line-2); }
+.alerts li.dim { opacity: .55; }
+.side .foot .tag { margin-left: 4px; }
+
+@media (max-width: 760px) {
+  .drawer { width: 100vw; }
+  .checks li { grid-template-columns: 20px 1fr; }
+  .checks li .sub { grid-column: 2; }
+}
+#setBody { display: flex; flex-direction: column; gap: 18px; }
+@media (max-width: 760px) { .toasts { left: 16px; right: 16px; } }
