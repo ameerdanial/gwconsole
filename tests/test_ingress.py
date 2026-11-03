@@ -1,3 +1,4 @@
+"""Tests for adding/removing tunnel hostnames (ingress) and input validation."""
 import pytest
 
 from app.tunnelops import edit_ingress, new_config_text, check_hostname, check_service
