@@ -2,12 +2,17 @@
 general settings — plus "change my password" for every signed-in user."""
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import re
 import secrets
+import shlex
+import socket
 import string
 import time
+from pathlib import Path
 
+import asyncssh
 from fastapi import APIRouter, Body, Request
 
 from . import notify
@@ -274,7 +279,156 @@ async def scan(request: Request, body: dict = Body(...)):
     host = str(body.get("host", "")).strip()
     if not HOST_RE.match(host):
         raise ValueError("host must be an IP address or hostname")
-    return await scan_host_key(host, int(body.get("port", 22)))
+    port = int(body.get("port", 22))
+    r = await scan_host_key(host, port)
+    r["from_ip"] = await asyncio.to_thread(source_ip_for, host, port)
+    return r
+
+
+def source_ip_for(host: str, port: int = 22) -> str:
+    """The local address this dashboard uses to reach host — what the node sees as our IP."""
+    try:
+        fam, _, _, _, addr = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
+        with socket.socket(fam, socket.SOCK_DGRAM) as sk:
+            sk.connect(addr)
+            ip_ = sk.getsockname()[0]
+    except OSError:
+        return ""
+    return ip_[7:] if ip_.startswith("::ffff:") else ip_
+
+
+PREP_SCRIPT = Path(__file__).resolve().parent.parent / "prepare-node.sh"
+RESULT_RE = re.compile(r"^@@gwc (.*)$", re.M)
+
+
+def _parse_results(out: str) -> dict:
+    d = {}
+    for line in RESULT_RE.findall(out):
+        for kv in line.split():
+            k, _, v = kv.partition("=")
+            d[k] = v
+    return d
+
+
+async def _run_prep(conn, login: str, password: str, args: list[str]) -> tuple[int, str]:
+    """Upload prepare-node.sh to a private temp file and run it as root (directly, or via sudo -S)."""
+    script = PREP_SCRIPT.read_text()
+    up = await conn.run('umask 077; f=$(mktemp /tmp/gwc-prep.XXXXXXXX) && cat > "$f" && echo "$f"', input=script, check=False)
+    path = str(up.stdout or "").strip()
+    if up.exit_status != 0 or not path.startswith("/tmp/gwc-prep."):
+        raise ValueError(f"could not upload the setup script: {str(up.stderr or up.stdout).strip()}")
+    argv = " ".join(shlex.quote(a) for a in args)
+    if login == "root":
+        cmd, inp = f"bash {path} {argv}; rc=$?; rm -f {path}; exit $rc", None
+    else:
+        # the password goes to sudo on stdin; it never appears on a command line
+        cmd = (f"if sudo -n true 2>/dev/null; then sudo -n bash {path} {argv}; "
+               f"else sudo -S -p '' bash {path} {argv}; fi; rc=$?; rm -f {path}; exit $rc")
+        inp = password + "\n"
+    r = await asyncio.wait_for(conn.run(cmd, input=inp, check=False), timeout=300)
+    out = (str(r.stdout or "") + str(r.stderr or "")).replace(password, "••••") if password else str(r.stdout or "")
+    return (r.exit_status if r.exit_status is not None else 255), out
+
+
+async def _verify_key(host: str, port: int, target: str, known) -> tuple[bool, str]:
+    """Log in with this dashboard's key exactly as it will later (and through sudo -n if not root)."""
+    try:
+        kc = await asyncio.wait_for(asyncssh.connect(host, port=port, username=target, known_hosts=known,
+                                                     client_keys=[st.s.ssh_key_file], agent_path=None,
+                                                     preferred_auth="publickey"), timeout=st.s.ssh_connect_timeout + 4)
+        try:
+            r = await kc.run("id -un" if target == "root" else "sudo -n id -un", check=False)
+        finally:
+            kc.close()
+        return r.exit_status == 0 and str(r.stdout or "").strip() == "root", str(r.stdout or r.stderr or "").strip()
+    except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
+        return False, str(e) or type(e).__name__
+
+
+@router.post("/admin/nodes/bootstrap")
+async def node_bootstrap(request: Request, body: dict = Body(...)):
+    """'Use the node's password once': log in with a password over a pinned host key, run
+    prepare-node.sh as root (installs this dashboard's key, from this dashboard's IP only,
+    socat, the HAProxy admin socket), then prove the key works. The password is used for this
+    one SSH session only — never stored, logged or returned."""
+    need(request, "superadmin")
+    host = str(body.get("host", "")).strip()
+    port = int(body.get("port") or 22)
+    login = str(body.get("login") or "root").strip()
+    password = str(body.get("password") or "")
+    host_key = str(body.get("host_key") or "").strip()
+    if not HOST_RE.match(host):
+        raise ValueError("host must be an IP address or hostname")
+    if not 1 <= port <= 65535:
+        raise ValueError("port must be 1-65535")
+    if not UNIX_USER_RE.match(login):
+        raise ValueError("bad login user name")
+    if not password:
+        raise ValueError("enter the node's password")
+    if not KEY_RE.match(host_key):
+        raise ValueError("scan and confirm the host key first")
+    try:
+        pub = open(st.s.ssh_key_file + ".pub").read().strip()
+    except OSError:
+        raise ValueError("this dashboard has no SSH key yet — re-run install.sh")
+    pattern = host if port == 22 else f"[{host}]:{port}"
+    known = asyncssh.import_known_hosts(f"{pattern} {host_key}\n")
+    log = []
+    try:
+        conn = await asyncio.wait_for(asyncssh.connect(
+            host, port=port, username=login, password=password, known_hosts=known,
+            client_keys=None, agent_path=None, preferred_auth="keyboard-interactive,password"),
+            timeout=st.s.ssh_connect_timeout + 4)
+    except asyncssh.PermissionDenied:
+        audit(request, "node bootstrap", f"{login}@{host}:{port}", False, "login refused")
+        hint = (" Debian/Ubuntu don't allow root to log in with a password by default — use a sudo user's"
+                " password instead, or the 'run a command' option." if login == "root" else "")
+        raise ValueError(f"{host} refused the login: wrong password, or password login is disabled for {login}.{hint}")
+    except asyncssh.HostKeyNotVerifiable:
+        raise ValueError(f"{host} presented a different host key than the one you confirmed — scan again")
+    except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
+        raise ValueError(f"could not connect to {host}:{port}: {e or type(e).__name__}")
+    try:
+        sock = conn.get_extra_info("sockname")
+        from_ip = str(body.get("from_ip") or "").strip() or (sock[0] if sock else "")
+        if from_ip.startswith("::ffff:"):
+            from_ip = from_ip[7:]
+        target = "root"
+        args = ["--key", pub, "--from", from_ip, "--user", target, "--yes"]
+        if body.get("fix_socket") is False:
+            args.append("--no-fix-socket")
+        rc, out = await _run_prep(conn, login, password, args)
+        log.append(out)
+        res = _parse_results(out)
+        verified, detail = (await _verify_key(host, port, target, known)) if rc == 0 else (False, "")
+        if rc == 0 and not verified and login != "root":
+            # root can't log in here (PermitRootLogin no): let the dashboard use the sudo user instead
+            target = login
+            args[args.index("--user") + 1] = target
+            rc, out = await _run_prep(conn, login, password, args)
+            log.append(f"\n--- root can't log in over SSH on this node: using {target} with sudo instead ---\n{out}")
+            res = _parse_results(out)
+            verified, detail = (await _verify_key(host, port, target, known)) if rc == 0 else (False, "")
+    except asyncio.TimeoutError:
+        raise ValueError("the setup script timed out on the node")
+    finally:
+        conn.close()
+    text = RESULT_RE.sub("", "\n".join(log)).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if rc != 0:
+        audit(request, "node bootstrap", f"{login}@{host}:{port}", False, text[-2000:])
+        hint = ""
+        if login != "root" and ("password is required" in text or "incorrect password" in text or "not in the sudoers" in text):
+            hint = f"\n\n{login} needs sudo rights on the node for this."
+        raise ValueError(f"the setup script failed (exit {rc}):\n{text[-1500:]}{hint}")
+    audit(request, "node bootstrap", f"{login}@{host}:{port}", verified,
+          f"key installed for {target} from {from_ip}; key login {'works' if verified else 'FAILED: ' + detail}")
+    node = {"user": target, "sudo": target != "root"}
+    if res.get("socket"):
+        node["stats_socket"] = res["socket"]
+    return {"ok": verified, "from_ip": from_ip, "node": node, "found": {k: res.get(k) for k in ("haproxy", "cloudflared")},
+            "socket_ok": res.get("socket_ok"), "output": text,
+            "error": None if verified else f"the key was installed but logging in with it failed: {detail}"}
 
 
 @router.post("/admin/nodes")
@@ -359,6 +513,39 @@ async def node_test(request: Request, body: dict = Body(...)):
     finally:
         await pool.close()
     return {"checks": checks}
+
+
+# ---- first-run setup wizard ------------------------------------------------------
+def setup_pending() -> bool:
+    """Show the wizard to superadmins until it's finished/skipped, unless nodes already exist (1.1 import)."""
+    return not st.store.get("setup_done") and not st.store.node_rows()
+
+
+@router.get("/admin/setup")
+async def setup_get(request: Request):
+    need(request, "superadmin")
+    try:
+        pub = open(st.s.ssh_key_file + ".pub").read().strip()
+    except OSError:
+        pub = ""
+    n = st.store.notify_cfg()
+    return {"done": bool(st.store.get("setup_done")), "nodes": st.store.node_rows(), "pubkey": pub,
+            "cf_accounts": st.store.cf_accounts(),
+            "notify": {ch: bool(n.get(ch, {}).get("enabled")) for ch in ("telegram", "discord")},
+            "dashboard_url": st.store.general().get("dashboard_url", "")}
+
+
+@router.post("/admin/setup")
+async def setup_set(request: Request, body: dict = Body(...)):
+    need(request, "superadmin")
+    done = bool(body.get("done", True))
+    st.store.put("setup_done", done)
+    url = str(body.get("dashboard_url") or "").strip()
+    if url and not st.store.general().get("dashboard_url"):
+        st.store.set_general({"dashboard_url": url})     # so alert messages can link back here
+        await st.reload()
+    audit(request, "setup " + ("finished" if done else "reopened"), "wizard", True)
+    return {"ok": True}
 
 
 # ---- notifications ---------------------------------------------------------------
