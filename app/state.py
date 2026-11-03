@@ -29,6 +29,7 @@ class State:
     inv: Inventory
     locks: dict
     engine: object          # alerts.Engine
+    monitor: object         # monitor.Monitor (sites, servers, history, weekly summary)
 
     async def reload(self):
         """Rebuild runtime settings after nodes / accounts / general settings change."""
@@ -37,6 +38,8 @@ class State:
         self.pool = SSHPool(self.s)
         self.cf = Cloudflare(self.s)
         self.inv = Inventory(self.s, self.pool)
+        from .sites import forget_models
+        forget_models()
         async def _close_later():          # let in-flight operations on the old pool finish
             await asyncio.sleep(120)
             await old_pool.close()
