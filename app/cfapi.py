@@ -240,3 +240,68 @@ class Cloudflare:
             done.append(r["name"])
         self.cache.drop_prefix("dns")
         return done
+
+    # --- token permission check (Settings → Cloudflare → Test) -----------------
+    AUTH_CODES = {9103, 9106, 9109, 10000, 10001}
+
+    async def _raw(self, acc: CFAccount, method: str, path: str, **kw) -> tuple[int, dict]:
+        r = await self.http.request(method, path, headers={"Authorization": f"Bearer {acc.api_token}"}, **kw)
+        try:
+            return r.status_code, r.json()
+        except ValueError:
+            return r.status_code, {}
+
+    def _denied(self, status: int, j: dict) -> bool:
+        codes = {e.get("code") for e in j.get("errors") or []}
+        return status in (401, 403) or bool(codes & self.AUTH_CODES)
+
+    async def check_permissions(self, acc: CFAccount) -> list[dict]:
+        """Report which permissions the token has. Edit rights are probed with deliberately
+        invalid requests (missing required fields): Cloudflare answers 400 if the token may
+        write and 403 if it may not, so nothing is ever created."""
+        out = []
+
+        def res(perm, ok, detail):
+            out.append({"perm": perm, "ok": ok, "detail": detail})
+
+        try:
+            s, j = await self._raw(acc, "GET", f"/accounts/{acc.account_id}/cfd_tunnel", params={"per_page": 1})
+            if j.get("success"):
+                res("Cloudflare Tunnel: Read", True, f"{(j.get('result_info') or {}).get('total_count', len(j.get('result') or []))} tunnel(s)")
+            else:
+                res("Cloudflare Tunnel: Read", False, self._errtext(s, j))
+            s, j = await self._raw(acc, "POST", f"/accounts/{acc.account_id}/cfd_tunnel", json={"config_src": "local"})
+            if j.get("success"):   # should never happen (no name) — clean up defensively
+                tid = (j.get("result") or {}).get("id")
+                if tid:
+                    await self._raw(acc, "DELETE", f"/accounts/{acc.account_id}/cfd_tunnel/{tid}")
+                res("Cloudflare Tunnel: Edit", True, "allowed")
+            else:
+                res("Cloudflare Tunnel: Edit", not self._denied(s, j),
+                    "allowed" if not self._denied(s, j) else "missing — needed to create/delete tunnels")
+            s, j = await self._raw(acc, "GET", "/zones", params={"account.id": acc.account_id, "per_page": 50})
+            zones = (j.get("result") or []) if j.get("success") else []
+            res("Zone: Read", bool(j.get("success")),
+                (f"{len(zones)} zone(s): " + ", ".join(z["name"] for z in zones[:6])) if j.get("success") else self._errtext(s, j))
+            if zones:
+                zid = zones[0]["id"]
+                s, j = await self._raw(acc, "GET", f"/zones/{zid}/dns_records", params={"per_page": 1})
+                res("DNS: Read", bool(j.get("success")), "ok" if j.get("success") else self._errtext(s, j))
+                s, j = await self._raw(acc, "POST", f"/zones/{zid}/dns_records", json={"type": "TXT"})
+                if j.get("success"):
+                    rid = (j.get("result") or {}).get("id")
+                    if rid:
+                        await self._raw(acc, "DELETE", f"/zones/{zid}/dns_records/{rid}")
+                res("DNS: Edit", not self._denied(s, j),
+                    "allowed" if not self._denied(s, j) else "missing — needed to create/fix/delete DNS routes")
+            else:
+                res("DNS: Read", False, "no zones visible to this token")
+                res("DNS: Edit", False, "no zones visible to this token")
+        except httpx.HTTPError as e:
+            res("Connection", False, f"cannot reach Cloudflare API: {e}")
+        return out
+
+    @staticmethod
+    def _errtext(status: int, j: dict) -> str:
+        errs = "; ".join(f"{e.get('code')}: {e.get('message')}" for e in j.get("errors") or [])
+        return errs or f"HTTP {status}"
