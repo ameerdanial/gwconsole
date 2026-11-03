@@ -1,3 +1,5 @@
+# CI: on every push and pull request, run the tests on Python 3.11-3.13 and
+# syntax-check the shell scripts and the web UI JavaScript.
 name: CI
 
 on:
@@ -28,6 +30,6 @@ jobs:
       - name: Shell scripts parse
         run: bash -n install.sh && bash -n prepare-node.sh && bash -n release.sh
       - name: JS parses
-        run: node --check app/static/app.js
+        run: for f in app/static/js/*.js; do node --check "$f"; done
       - name: VERSION is semver
         run: grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION
