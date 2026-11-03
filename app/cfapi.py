@@ -69,6 +69,24 @@ class Cloudflare:
                 return out
             page += 1
 
+    async def graphql(self, acc: CFAccount, query: str, variables: dict) -> dict:
+        """Cloudflare GraphQL Analytics API (needs the token permission Zone → Analytics → Read)."""
+        if not acc.api_token:
+            raise CFError(f"no API token configured for account {acc.name}")
+        r = await self.http.post("/graphql", json={"query": query, "variables": variables},
+                                 headers={"Authorization": f"Bearer {acc.api_token}"}, timeout=30)
+        try:
+            j = r.json()
+        except ValueError:
+            raise CFError(f"Cloudflare analytics HTTP {r.status_code}")
+        errs = j.get("errors") or []
+        if errs or r.status_code >= 400:
+            msg = "; ".join(str(e.get("message", e)) for e in errs) or f"HTTP {r.status_code}"
+            if r.status_code in (401, 403) or "authoriz" in msg.lower() or "access" in msg.lower():
+                msg += " — the token needs Zone → Analytics → Read"
+            raise CFError(msg)
+        return j.get("data") or {}
+
     # --- tunnels ------------------------------------------------------------
     async def tunnels(self, acc: CFAccount) -> list[dict]:
         key = ("tun", acc.name)
@@ -294,6 +312,12 @@ class Cloudflare:
                         await self._raw(acc, "DELETE", f"/zones/{zid}/dns_records/{rid}")
                 res("DNS: Edit", not self._denied(s, j),
                     "allowed" if not self._denied(s, j) else "missing — needed to create/fix/delete DNS routes")
+                q = "query($z: string!) { viewer { zones(filter: {zoneTag: $z}) { zoneTag } } }"
+                try:
+                    await self.graphql(acc, q, {"z": zid})
+                    res("Analytics: Read", True, "traffic numbers available")
+                except CFError as e:
+                    res("Analytics: Read", False, f"missing — needed for the Traffic page ({e})")
             else:
                 res("DNS: Read", False, "no zones visible to this token")
                 res("DNS: Edit", False, "no zones visible to this token")
