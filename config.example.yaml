@@ -1,76 +1,26 @@
-# /etc/gwconsole/config.yaml  — Gateway Console
-# After editing:  systemctl restart gwconsole   (then: gwconsole check)
+# /etc/gwconsole/config.yaml — Gateway Console bootstrap settings
+#
+# From v1.2 this file only holds what the server needs before it starts.
+# Users, nodes, Cloudflare accounts, notifications and general settings are
+# managed in the web UI (Settings) and stored in the database.
+# After editing: systemctl restart gwconsole
 
-listen: 0.0.0.0          # bind address of the dashboard (put it on your mgmt VLAN / Tailscale only)
+listen: 0.0.0.0          # bind address (keep it on your management VLAN / Tailscale)
 port: 8088
-session_hours: 12
-keep_backups: 20         # config backups kept per file on each node
-
-# Login users. Generate a hash with:  gwconsole hashpw
-users:
-  ameer: "scrypt$REPLACE_ME"
 
 ssh:
-  key_file: /etc/gwconsole/id_ed25519          # created by install.sh
-  known_hosts: /etc/gwconsole/known_hosts      # add hosts with:  gwconsole trust <ip>
+  key_file: /etc/gwconsole/id_ed25519        # created by install.sh
+  known_hosts: /etc/gwconsole/known_hosts    # only for nodes without a pinned host key
   connect_timeout: 8
 
-# ---------------------------------------------------------------- HAProxy
-# Needs on the node:  apt install socat
-# and in haproxy.cfg 'global':  stats socket /run/haproxy/admin.sock mode 660 level admin
-haproxy_nodes:
-  - name: haproxy-dc1
-    site: DC1
-    host: 192.168.10.10          # <-- HAProxy VM IP
-    port: 22
-    user: root                   # or a dedicated user with  sudo: true
-    sudo: false
-    config_path: /etc/haproxy/haproxy.cfg
-    stats_socket: /run/haproxy/admin.sock
-    backup_dir: /etc/haproxy/gwc-backups
-    service: haproxy
+# Paths (defaults shown; you normally don't change these)
+# db_path: /var/lib/gwconsole/gwconsole.db
+# secret_key_file: /etc/gwconsole/secret.key
+# audit_log: /var/lib/gwconsole/audit.log
 
-  # - name: haproxy-dr           # add your DR node the same way when it exists
-  #   site: DR
-  #   host: 192.168.20.10
-
-# ---------------------------------------------------------------- cloudflared
-# Tunnels are AUTO-DISCOVERED: every cloudflared-<name>.service, cloudflared@<name>.service
-# and cloudflared.service on the node shows up, with its --config path read from the unit.
-# The Cloudflare account is matched automatically by tunnel ID. New tunnels created from
-# the dashboard land in tunnel_base_dir/<name>/ with a cloudflared-<name>.service unit.
-cloudflared_nodes:
-  - name: cloudflared-lxc
-    site: DC1
-    host: 192.168.10.11          # <-- cloudflared LXC IP
-    user: root
-    cloudflared_bin: cloudflared
-    discover: true               # default
-    tunnel_base_dir: /root/.cloudflared
-    # Optional per-tunnel overrides (only needed for special cases):
-    # tunnels:
-    #   - name: adproject
-    #     metrics: 127.0.0.1:20241        # if cloudflared runs with --metrics: shows readyConnections
-    #   - name: kodje
-    #     cf_account: kodje               # pin an account instead of auto-match
-    #   - name: legacy
-    #     unit: my-odd-unit-name.service  # a unit that doesn't follow the cloudflared* naming
-    #     config_path: /opt/legacy/config.yml
-
-# ---------------------------------------------------------------- Cloudflare API
-# One entry per Cloudflare account. Tokens go in /etc/gwconsole/env (chmod 600), not here.
-# Token permissions:
-#   Account > Cloudflare Tunnel > Edit   (Read is enough if you never create/delete tunnels)
-#   Zone    > Zone > Read
-#   Zone    > DNS  > Edit                (Read is enough if you never create/fix/delete DNS routes)
-cloudflare:
-  accounts:
-    - name: main                 # adproject.fun + selatwave live in this account
-      account_id: "REPLACE_WITH_ACCOUNT_ID"
-      api_token_env: CF_TOKEN_MAIN
-    - name: penipumy
-      account_id: "REPLACE_WITH_ACCOUNT_ID"
-      api_token_env: CF_TOKEN_PENIPUMY
-    - name: kodje
-      account_id: "REPLACE_WITH_ACCOUNT_ID"
-      api_token_env: CF_TOKEN_KODJE
+# ---------------------------------------------------------------------------
+# Upgrading from v1.1? Leave your old users:, haproxy_nodes:, cloudflared_nodes:
+# and cloudflare: sections in place. On the first start of v1.2 they are imported
+# into the database once (tokens from /etc/gwconsole/env included), and ignored
+# after that. Rolling back to v1.1 keeps working because this file is untouched.
+# ---------------------------------------------------------------------------
