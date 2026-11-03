@@ -1,0 +1,11 @@
+# Watches for a request from the dashboard (check for updates, update, back up) and starts
+# gwconsole-helper.service as root to carry it out. Installed by install.sh.
+[Unit]
+Description=Gateway Console helper trigger
+
+[Path]
+PathExists=/var/lib/gwconsole/helper/request
+MakeDirectory=no
+
+[Install]
+WantedBy=multi-user.target
