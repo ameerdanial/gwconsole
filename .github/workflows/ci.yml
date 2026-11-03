@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]   # 3.11 = Debian 12 LXC default
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m compileall -q app
+      - run: python -m pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell scripts parse
+        run: bash -n install.sh && bash -n prepare-node.sh && bash -n release.sh
+      - name: JS parses
+        run: node --check app/static/app.js
+      - name: VERSION is semver
+        run: grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION
