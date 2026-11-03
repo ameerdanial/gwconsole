@@ -17,11 +17,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, cloudflared, configops, haproxy, history, tunnelops
+from . import __version__, cloudflared, configops, haproxy, history, hpcfg, sites, tunnelops
 from .alerts import Engine
 from .api_admin import router as admin_router
 from .api_alerts import active_alerts, router as alerts_router
 from .api_haproxy import router as haproxy_router
+from .api_monitor import enrich_tunnels, router as monitor_router
 from .api_system import record_running_version, router as system_router, whatsnew_pending
 from .audit import Audit
 from .auth import Sessions
@@ -30,6 +31,7 @@ from .collect import build_alerts, collect_all, kpis, resolve_edge, tunnel_ref, 
 from .config import load
 from .db import DB
 from .inventory import Inventory
+from .monitor import Monitor
 from .sshpool import NodeError, SSHPool
 from .state import COOKIE, audit, ip, need, shielded, st, user
 from .store import Store, ip_allowed
@@ -66,9 +68,12 @@ async def lifespan(app: FastAPI):
     record_running_version()
     configops.ON_APPLIED = lambda node, path, content, stage: history.on_applied(st.store, base.db_path, node, path, content, stage)
     st.engine = Engine()
+    st.monitor = Monitor()
     if not getattr(app.state, "no_engine", False):
         st.engine.start()
+        st.monitor.start()
     yield
+    await st.monitor.stop()
     await st.engine.stop()
     await st.pool.close()
     await st.cf.close()
@@ -78,6 +83,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Gateway Console", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None,
               openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+app.include_router(monitor_router)
 app.include_router(alerts_router)
 app.include_router(admin_router)
 app.include_router(haproxy_router)
@@ -209,7 +215,54 @@ async def overview():
 # ---- HAProxy ----------------------------------------------------------------
 @app.get("/api/haproxy/{node}")
 async def hp_status(node: str):
-    return await haproxy.status(st.pool, st.s.haproxy(node))
+    n = st.s.haproxy(node)
+    out, text = await asyncio.gather(haproxy.status(st.pool, n),
+                                     configops.read_file(st.pool, n, n.config_path), return_exceptions=True)
+    if isinstance(out, BaseException):
+        raise out
+    if not isinstance(text, BaseException):
+        # servers whose drain / maintenance is written in haproxy.cfg ("kept after restart")
+        flags = hpcfg.server_flags(text)
+        for be in out.get("backends", []):
+            for s in be["servers"]:
+                f = flags.get(f"{be['name']}/{s['name']}") or {}
+                s["kept"] = "maint" if f.get("disabled") else ("drain" if f.get("weight") == "0" else "")
+    return out
+
+
+async def _persist_state(request: Request, n, be: str, srv: str, state: str) -> str:
+    """Write maint → 'disabled', drain → 'weight 0', ready → neither into haproxy.cfg without reloading,
+    so the state survives a reload or restart. The original weight is remembered for 'ready'."""
+    key = f"hp_weight:{n.name}/{be}/{srv}"
+    async with _lock(n.name):
+        text = await configops.read_file(st.pool, n, n.config_path)
+        cur = hpcfg.server_flags(text).get(f"{be}/{srv}")
+        if cur is None:
+            raise ValueError(f"server {be}/{srv} is not in {n.config_path} (added at runtime?)")
+        if state == "maint":
+            new = hpcfg.set_server_flags(text, be, srv, disabled=True)
+        elif state == "drain":
+            if cur["weight"] != "0":
+                st.store.put(key, cur["weight"])
+            new = hpcfg.set_server_flags(text, be, srv, disabled=False, weight="0")
+        else:
+            w = cur["weight"]
+            if w == "0":
+                w = st.store.get(key, "") or ""
+            new = hpcfg.set_server_flags(text, be, srv, disabled=False, weight=w)
+            st.store.db.x("DELETE FROM settings WHERE key=?", (key,))
+        if new == text:
+            return "already in haproxy.cfg"
+        svc = shlex.quote(n.service)
+        r = await configops.apply(st.pool, n, cfg_path=n.config_path, content=new, base_hash=configops.sha(text),
+                                  backup_dir=n.backup_dir, prefix="haproxy.cfg",
+                                  validate_cmd=f"{shlex.quote(n.haproxy_bin)} -c -f {{file}}",
+                                  activate_cmd="true", check_cmd=f"systemctl is-active --quiet {svc}",
+                                  settle=0, keep=st.s.keep_backups)
+        sites.forget_models()
+        if not r.get("ok"):
+            raise ValueError("couldn't save it in haproxy.cfg: " + (r.get("error") or r.get("output") or "failed")[-300:])
+        return "saved in haproxy.cfg (no reload needed)"
 
 
 @app.post("/api/haproxy/{node}/server")
@@ -217,13 +270,16 @@ async def hp_server(request: Request, node: str, body: dict = Body(...)):
     need(request, "operator")
     n = st.s.haproxy(node)
     be, srv, state = str(body.get("backend")), str(body.get("server")), str(body.get("state"))
+    keep = body.get("keep", True) is not False
     try:
         msg = await haproxy.set_server_state(st.pool, n, be, srv, state)
+        if keep:
+            msg = f"{msg} · {await _persist_state(request, n, be, srv, state)}"
     except (NodeError, ValueError) as e:
         audit(request, f"server→{state}", f"{node}:{be}/{srv}", False, str(e))
         raise
-    audit(request, f"server→{state}", f"{node}:{be}/{srv}", True, msg)
-    return {"ok": True, "output": msg}
+    audit(request, f"server→{state}{' (kept)' if keep else ''}", f"{node}:{be}/{srv}", True, msg)
+    return {"ok": True, "output": msg, "kept": keep}
 
 
 @app.post("/api/haproxy/{node}/service")
@@ -291,7 +347,11 @@ async def hp_logs(node: str, source: str = "service", lines: int = 200):
 # ---- cloudflared --------------------------------------------------------------
 @app.get("/api/tunnels")
 async def tunnels():
-    return await tunnels_full(with_dns=True)
+    data, hp = await asyncio.gather(
+        tunnels_full(with_dns=True),
+        asyncio.gather(*(haproxy.status(st.pool, n) for n in st.s.haproxy_nodes), return_exceptions=True))
+    hp = [h for h in hp if isinstance(h, dict)]
+    return await enrich_tunnels(data, hp)
 
 
 def _lock(node: str) -> asyncio.Lock:
@@ -346,6 +406,29 @@ async def tun_dns(request: Request, node: str, tunnel: str, body: dict = Body(..
         raise
     audit(request, "dns route", f"{tunnel}:{hostname}", True, msg)
     return {"ok": True, "output": msg}
+
+
+@app.post("/api/tunnels/{node}/{tunnel}/dns/delete")
+async def tun_dns_delete(request: Request, node: str, tunnel: str, body: dict = Body(...)):
+    """Delete an orphan DNS record: it points at this tunnel but no ingress rule serves it."""
+    need(request, "operator")
+    n, t = await st.inv.get(node, tunnel)
+    hostname = str(body.get("hostname", "")).strip().lower()
+    lt = await _local_tunnel(n, t)
+    if hostname in {r["hostname"].lower() for r in lt["config"]["ingress"] if r["hostname"]}:
+        raise ValueError(f"{hostname} still has an ingress rule — remove the hostname instead")
+    acc, edge = await resolve_edge(node, t, tunnel_ref(node, lt))
+    if not acc or not edge:
+        raise ValueError("tunnel not found in any configured Cloudflare account")
+    try:
+        gone = await st.cf.delete_records_for_tunnel(acc, edge["id"], only=hostname)
+    except CFError as e:
+        audit(request, "dns delete", f"{tunnel}:{hostname}", False, str(e))
+        raise
+    audit(request, "dns delete", f"{tunnel}:{hostname}", bool(gone), ", ".join(gone))
+    if not gone:
+        raise ValueError(f"no DNS record for {hostname} points at {tunnel}")
+    return {"ok": True, "output": f"Deleted {', '.join(gone)}"}
 
 
 # ---- tunnel lifecycle ---------------------------------------------------------
