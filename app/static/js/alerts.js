@@ -65,6 +65,7 @@ PAGES.alerts = {
         <td>${a.status === "resolved" ? pill("ok", "resolved") : pill(a.sev === "crit" ? "crit" : "warn", "firing")}
           ${a.acked_by ? `<div class="sub">ack by ${esc(a.acked_by)}</div>` : ""}${a.muted ? `<div class="sub">muted until ${esc(fmt.short(a.muted_until))}</div>` : ""}</td>
         <td><div class="row op" style="flex-wrap:nowrap;justify-content:flex-end">${a.status === "firing" ? `
+          ${a.kind === "cfg.drift" ? `<button class="btn sm pri" data-accept="${esc(a.where)}" title="Keep the file as it is now and stop alerting">Accept change</button>` : ""}
           <button class="btn sm" data-ack="${a.id}" data-v="${a.acked_by ? 0 : 1}">${a.acked_by ? "Unack" : "Ack"}</button>
           ${a.muted ? `<button class="btn sm" data-unmute="${esc(a.key)}">Unmute</button>`
             : `<select class="sm" data-mute="${esc(a.key)}"><option value="">Mute…</option><option value="30">30 min</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="1440">24 hours</option><option value="10080">7 days</option></select>`}` : ""}</div></td></tr>`).join("")}
@@ -88,6 +89,10 @@ PAGES.alerts = {
       } else if (b.dataset.unmute) {
         const m = S.cache.mutes.find((x) => x.match === b.dataset.unmute);
         if (m) await api(`/api/mutes/${m.id}`, { method: "DELETE" });
+      } else if (b.dataset.accept) {
+        if (!(await confirmBox("Accept this change?", `<p>The file as it is now on the node becomes the known version. It's already saved in the config history (and in Edit config → History you can restore an older backup).</p>`, "Accept"))) return;
+        await api("/api/alerts/drift/accept", { body: { where: b.dataset.accept } });
+        await api("/api/alerts/check", { body: {} }).catch(() => {});
       } else if (b.dataset.delmute) {
         await api(`/api/mutes/${b.dataset.delmute}`, { method: "DELETE" });
       } else return;
