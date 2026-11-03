@@ -201,6 +201,12 @@ async function boot() {
   $("#app").classList.remove("hidden");
   if (me.must_change) { await forcePasswordChange(); return; }
   S.inv = await api("/api/inventory");
+  updateBanner(me.updated);
+  if (can("superadmin")) api("/api/system").then((d) => {
+    const u = d.update || {};
+    const has = u.latest && u.current && u.latest !== u.current && (u.available || []).length;
+    $("#ver").innerHTML = `v${esc(me.version)}${has ? ` · <a href="#/settings/about" class="updlink" title="Update available">${esc(u.latest)} available</a>` : ""}`;
+  }).catch(() => {});
   // fresh install: walk the superadmin through nodes → Cloudflare → alerts (no extra hashchange)
   if (me.setup && !/^#\/setup/.test(location.hash)) history.replaceState(null, "", "#/setup");
   route();
@@ -310,4 +316,41 @@ function schedule() {
   clearTimeout(S.timer);
   const p = PAGES[S.page];
   if ($("#auto").checked && p.every && !Editor.isOpen()) S.timer = setTimeout(() => refresh(false), p.every * 1000);
+}
+
+// ---------------------------------------------------------------- changelog text and the post-update banner
+/** Tiny Markdown subset used by CHANGELOG.md: ### headings, - bullets (with continuation lines), **bold**, `code`. */
+function mdLite(text) {
+  const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+  let html = "", inList = false, item = "", sub = false;
+  const flush = () => { if (item) { html += `<li${sub ? ` class="sub"` : ""}>${inline(item)}</li>`; item = ""; } };
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^#{2,4} /.test(line)) { flush(); if (inList) { html += "</ul>"; inList = false; } html += `<h5>${inline(line.replace(/^#+ /, ""))}</h5>`; }
+    else if (/^- /.test(line)) { flush(); if (!inList) { html += "<ul>"; inList = true; } item = line.slice(2); sub = false; }
+    else if (/^\s+- /.test(line) && inList) { flush(); item = line.trim().slice(2); sub = true; }
+    else if (/^\s+\S/.test(line) && item) item += " " + line.trim();
+    else if (line.trim()) { flush(); if (inList) { html += "</ul>"; inList = false; } html += `<p>${inline(line)}</p>`; }
+  }
+  flush();
+  if (inList) html += "</ul>";
+  return html;
+}
+
+function updateBanner(u) {
+  $("#updBanner")?.remove();
+  if (!u) return;
+  const el = document.createElement("div");
+  el.id = "updBanner";
+  el.className = "banner";
+  el.innerHTML = `<span>✨ Gateway Console was updated to <b>v${esc(u.to)}</b>${u.from && /^\d/.test(u.from) ? ` (from v${esc(u.from)})` : ""}.</span>
+    <button class="btn sm pri" data-wn>See what's new</button><button class="btn ghost sm" data-x title="Dismiss">✕</button>`;
+  const seen = () => { api("/api/whatsnew/seen", { body: {} }).catch(() => {}); el.remove(); };
+  el.querySelector("[data-x]").addEventListener("click", seen);
+  el.querySelector("[data-wn]").addEventListener("click", async () => {
+    const d = await api("/api/system");
+    seen();
+    modal({ title: `What's new in v${d.version}`, size: "lg", body: `<div class="md">${mdLite((d.whatsnew || "").replace(/^## .*\n?/, ""))}</div>`, actions: [{ label: "Close", value: true }] });
+  });
+  $(".main").prepend(el);
 }
