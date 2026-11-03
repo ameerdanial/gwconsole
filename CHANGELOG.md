@@ -5,6 +5,44 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-03
+### Added
+- **Config editor in a side panel**: "Edit config" on the HAProxy and Tunnels pages opens the
+  editor over the live stats. A **History** tab lists every backup with who made the change,
+  shows the diff against the current file, and restores a version in one click.
+  The Config page is gone from the sidebar (old `#/config/...` links still work).
+- **Alerts page**: a background checker (every 30 s, even with no browser open) keeps each alert's
+  lifecycle — firing → resolved with start time and duration, flapping grouped into one alert,
+  escalations tracked. Active and History views, filters, acknowledge, mute an alert or a whole
+  node (maintenance), CSV export, 90-day retention.
+- **Telegram and Discord notifications** (Settings → Notifications): only new, escalated and
+  resolved alerts, batched per check, never repeated; minimum severity and recoveries per channel;
+  "Send test" button.
+- **Users and roles**: viewer (read-only), operator (day-to-day changes), superadmin (everything).
+  Add, disable, delete, reset password (temporary password, must be changed at first login),
+  change your own password, see and revoke signed-in sessions. Sessions survive restarts.
+- **Settings page** (superadmin): Cloudflare accounts with a token permission test (checks Tunnel
+  and DNS read/edit without changing anything), nodes with host-key scan + fingerprint confirmation
+  and an SSH test, notifications, general settings.
+- CLI: `gwconsole create-admin`, `reset-password <user>`, `users`.
+
+### Changed
+- Users, nodes, Cloudflare accounts and settings now live in a SQLite database
+  (`/var/lib/gwconsole/gwconsole.db`). On the first start of 1.2.0 they are imported from
+  `config.yaml` once; after that the web UI is the source of truth. `config.yaml` is only the
+  bootstrap file (listen address, port, paths).
+- Secrets (Cloudflare tokens, Telegram bot token, Discord webhook) are encrypted at rest with
+  `/etc/gwconsole/secret.key`, created by `install.sh`.
+- Nodes added in the UI pin their SSH host key; existing nodes keep using `known_hosts` until edited.
+- `install.sh` backs up `/etc/gwconsole` and the database to `/var/backups/gwconsole/` before upgrading.
+- Web UI JavaScript split into one file per page under `app/static/js/`.
+- Git history rewritten so every file has its own descriptive commit; the `v1.1.0` tag was
+  recreated (same code). Existing clones: `git fetch --tags --force`.
+
+### Fixed
+- Config backups are listed and pruned by when they were taken, not by file modification time.
+- Validation errors from the API show a readable message instead of "HTTP 422".
+
 ## [1.1.0] - 2026-11-03
 ### Added
 - **Tunnel lifecycle**: create a tunnel (Cloudflare API + credentials + config.yml + systemd unit + DNS)
@@ -35,5 +73,6 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
   rule tester; config editor with validate → diff → backup → apply → health check → auto-rollback;
   audit log; scrypt login; SSH key access with `from=` restriction; installer and node prep script.
 
-[Unreleased]: ../../compare/v1.1.0...HEAD
+[Unreleased]: ../../compare/v1.2.0...HEAD
+[1.2.0]: ../../compare/v1.1.0...v1.2.0
 [1.1.0]: ../../releases/tag/v1.1.0
