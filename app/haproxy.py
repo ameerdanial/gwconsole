@@ -50,7 +50,7 @@ def parse_stat(text: str) -> dict:
             "name": r["svname"] if typ == "2" else r["pxname"],
             "status": r.get("status", ""),
             "scur": _int(r.get("scur")), "smax": _int(r.get("smax")), "slim": _int(r.get("slim")),
-            "stot": _int(r.get("stot")), "rate": _int(r.get("rate")), "req_rate": _int(r.get("req_rate")),
+            "stot": _int(r.get("stot")), "req_tot": _int(r.get("req_tot")), "rate": _int(r.get("rate")), "req_rate": _int(r.get("req_rate")),
             "bin": _int(r.get("bin")), "bout": _int(r.get("bout")),
             "ereq": _int(r.get("ereq")), "econ": _int(r.get("econ")), "eresp": _int(r.get("eresp")),
             "hrsp_2xx": _int(r.get("hrsp_2xx")), "hrsp_3xx": _int(r.get("hrsp_3xx")),
