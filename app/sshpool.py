@@ -45,13 +45,20 @@ class SSHPool:
                 c = await asyncio.wait_for(asyncssh.connect(
                     t.host, port=t.port, username=t.user,
                     client_keys=[self.s.ssh_key_file],
-                    known_hosts=self.s.ssh_known_hosts,
+                    known_hosts=self._known_hosts(t),
                     keepalive_interval=20,
                 ), timeout=self.s.ssh_connect_timeout)
             except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
                 raise NodeError(f"{t.name} ({t.host}): SSH connect failed: {e or type(e).__name__}") from e
             self._conns[t.name] = c
             return c
+
+    def _known_hosts(self, t: SSHTarget):
+        """Pinned host key from the UI if set, else the known_hosts file."""
+        if getattr(t, "host_key", ""):
+            pattern = t.host if t.port == 22 else f"[{t.host}]:{t.port}"
+            return asyncssh.import_known_hosts(f"{pattern} {t.host_key}\n")
+        return self.s.ssh_known_hosts
 
     async def run(self, t: SSHTarget, cmd: str, *, input: str | None = None, timeout: int = 30,
                   root: bool = True, critical: bool = False) -> Result:
@@ -90,3 +97,18 @@ class SSHPool:
         for c in self._conns.values():
             c.close()
         self._conns.clear()
+
+
+async def scan_host_key(host: str, port: int = 22, timeout: int = 8) -> dict:
+    """Fetch a server's SSH host key (no login) so a superadmin can confirm its fingerprint."""
+    try:
+        key = await asyncio.wait_for(asyncssh.get_server_host_key(
+            host, port, server_host_key_algs=["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                                              "ecdsa-sha2-nistp521", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]),
+            timeout=timeout)
+    except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
+        raise NodeError(f"{host}:{port}: could not read host key: {e or type(e).__name__}") from e
+    if key is None:
+        raise NodeError(f"{host}:{port}: server sent no host key")
+    algo, b64 = key.export_public_key("openssh").decode().split()[:2]
+    return {"key": f"{algo} {b64}", "type": algo, "fingerprint": key.get_fingerprint("sha256")}
