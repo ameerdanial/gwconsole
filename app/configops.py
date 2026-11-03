@@ -74,7 +74,7 @@ rollback() {{ cat "$B" > "$CFG"; {activate_cmd} 2>&1; echo "@@GWC:ROLLED_BACK"; 
 {activate_cmd} 2>&1 || rollback
 sleep {int(settle)}
 {check_cmd} >/dev/null 2>&1 || rollback
-ls -1t "$BK"/{prefix}.* 2>/dev/null | tail -n +{int(keep) + 1} | xargs -r rm -f
+ls -1 "$BK"/{prefix}.* 2>/dev/null | sort -r | tail -n +{int(keep) + 1} | xargs -r rm -f
 echo "@@GWC:OK"
 """
     r = await pool.run(t, script, timeout=120, critical=True)
@@ -95,7 +95,7 @@ echo "@@GWC:OK"
 
 async def list_backups(pool: SSHPool, t: SSHTarget, backup_dir: str, prefix: str) -> list[dict]:
     d = shlex.quote(backup_dir)
-    r = await pool.run(t, f'for f in $(ls -1t {d}/{prefix}.* 2>/dev/null); do stat -c "%n|%s|%Y" "$f"; done')
+    r = await pool.run(t, f'for f in $(ls -1 {d}/{prefix}.* 2>/dev/null); do stat -c "%n|%s|%Y" "$f"; done')
     items = []
     for line in r.out.splitlines():
         try:
@@ -103,9 +103,14 @@ async def list_backups(pool: SSHPool, t: SSHTarget, backup_dir: str, prefix: str
         except ValueError:
             continue
         name = path.rsplit("/", 1)[-1]
-        if re.fullmatch(re.escape(prefix) + r"\." + TS_RE, name):
-            items.append({"name": name, "size": int(size), "mtime": int(mtime)})
-    return items
+        m = re.fullmatch(re.escape(prefix) + r"\.(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)", name)
+        if m:
+            y, mo, dd, hh, mi, ss = m.groups()
+            # the timestamp in the name is when the backup was taken (node local time);
+            # mtime is when that version of the file was last written (cp -p keeps it)
+            items.append({"name": name, "size": int(size), "mtime": int(mtime),
+                          "stamp": f"{y}-{mo}-{dd} {hh}:{mi}:{ss}"})
+    return sorted(items, key=lambda b: b["name"], reverse=True)
 
 
 async def read_backup(pool: SSHPool, t: SSHTarget, backup_dir: str, prefix: str, name: str) -> str:
