@@ -5,6 +5,7 @@ import csv
 import io
 import re
 import shlex
+import time
 
 from . import configops
 from .config import HAProxyNode, Settings
@@ -103,16 +104,21 @@ def _svc_props(text: str) -> dict:
 async def status(pool: SSHPool, n: HAProxyNode) -> dict:
     svc = shlex.quote(n.service)
     cmd = (f"systemctl show {svc} -p ActiveState -p SubState -p ActiveEnterTimestamp -p NRestarts -p MainPID; "
-           f"echo {SPLIT}; {_sock(n, 'show info')} 2>&1; echo {SPLIT}; {_sock(n, 'show stat')} 2>&1")
+           f"echo {SPLIT}; {_sock(n, 'show info')} 2>&1; echo {SPLIT}; {_sock(n, 'show stat')} 2>&1; echo {SPLIT}; "
+           f"d=$(systemctl show {svc} -p ActiveEnterTimestamp --value 2>/dev/null); "
+           f"[ -n \"$d\" ] && echo $(( $(date +%s) - $(date -d \"$d\" +%s 2>/dev/null || date +%s) ))")
     r = await pool.run(n, cmd)
     parts = r.out.split(SPLIT)
     if len(parts) < 3:
         raise NodeError(f"{n.name}: unexpected output: {r.text[:300]}")
     out = {"node": n.name, "host": n.host, "site": n.site, "service": _svc_props(parts[0])}
+    ago = _int(parts[3].strip()) if len(parts) > 3 else None
+    # seconds-ago is measured on the node itself, so clock differences don't matter
+    out["service"]["since_epoch"] = int(time.time()) - ago if ago is not None and ago >= 0 else None
     info = parse_info(parts[1])
     out["info"] = {k: info.get(k) for k in (
         "Version", "Uptime", "Uptime_sec", "Process_num", "Nbthread", "CurrConns", "Maxconn",
-        "ConnRate", "SessRate", "CumConns", "CumReq", "Run_queue", "Idle_pct", "node")}
+        "ConnRate", "SessRate", "CumConns", "CumReq", "Run_queue", "Idle_pct", "node", "Release_date")}
     try:
         out.update(parse_stat(parts[2]))
         out["stats_error"] = None
