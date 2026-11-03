@@ -1,0 +1,9 @@
+# Nightly job: back up the dashboard (and copy it to a node if set) and check for new versions.
+[Unit]
+Description=Gateway Console nightly backup and update check
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gwconsole helper --scheduled
+TimeoutStartSec=30min
