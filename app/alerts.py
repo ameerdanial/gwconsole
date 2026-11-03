@@ -8,11 +8,14 @@ Every `alert_interval` seconds it collects live state, evaluates the alert rules
 
 Alerts whose scope could not be checked (node unreachable, CF API failing) are left
 as they are instead of being resolved. Changes are passed to Telegram / Discord.
+Every DRIFT_EVERY seconds it also checks managed config files for changes made outside the
+dashboard (history.check_drift), and it announces newly available dashboard versions.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 import httpx
@@ -25,6 +28,7 @@ log = logging.getLogger("gwconsole.alerts")
 RESOLVE_AFTER = 2
 FLAP_WINDOW = 600
 FLAP_QUIET = 3          # after this many flaps, stop notifying on re-fire
+DRIFT_EVERY = int(os.environ.get("GWC_DRIFT_EVERY", "900"))
 
 
 def is_muted(alert: dict, mutes: list[dict]) -> dict | None:
@@ -42,6 +46,8 @@ class Engine:
         self.last_snapshot: dict | None = None
         self._lock = asyncio.Lock()
         self._last_purge = 0
+        self._last_drift = 0
+        self.drift: list[dict] = []
         self.http = httpx.AsyncClient(timeout=15)
 
     # ------------------------------------------------------------ lifecycle
@@ -74,11 +80,13 @@ class Engine:
         async with self._lock:
             hp, tun = await collect_all()
             current, unknown = build_alerts(hp, tun, bool(st.s.cf_accounts))
+            current += await self.drift_alerts()
             changes = self.process(current, unknown, int(time.time()))
             self.last_run = int(time.time())
             self.last_error = ""
             self.last_snapshot = {"at": self.last_run, "kpi": kpis(hp, tun)}
             await self.dispatch(changes)
+            await self.update_notice()
             self.purge()
             return {"changes": len(changes), "active": len(current)}
 
@@ -173,6 +181,47 @@ class Engine:
                 status[ch] = {"at": int(time.time()), "ok": False, "error": str(e)[:300], "sent": 0}
                 log.warning("notification via %s failed: %s", ch, e)
         st.store.put("notify_status", status)
+
+    async def drift_alerts(self) -> list[dict]:
+        """Config files changed outside the dashboard: re-checked every DRIFT_EVERY s, kept between."""
+        from . import history
+        if not st.store.general().get("drift_check", True):
+            self.drift = []
+            return []
+        if time.time() - self._last_drift >= DRIFT_EVERY:
+            self._last_drift = time.time()
+            try:
+                self.drift = await history.check_drift(st)
+            except Exception as e:
+                log.warning("drift check failed: %s", e)
+        # accepted or overwritten since the last check → drop right away
+        self.drift = [a for a in self.drift if st.store.get(f"cfg_drift:{a['where']}")]
+        return list(self.drift)
+
+    async def update_notice(self):
+        """Tell the notification channels once about each new dashboard version."""
+        from .api_system import helper_status
+        s = helper_status()
+        latest, cur = s.get("latest"), s.get("current")
+        if not latest or latest == cur or st.store.get("update_notified") == latest:
+            return
+        st.store.put("update_notified", latest)
+        url = st.s.dashboard_url
+        await self.announce(f"Gateway Console {latest} is available (you have {cur}). "
+                            f"Open Settings → About to see what's new and update{(' — ' + url + '/#/settings/about') if url else ''}.")
+
+    async def announce(self, text: str):
+        """Send a one-off message to every enabled channel (no severity filter)."""
+        cfg = st.store.notify_cfg()
+        for ch in ("telegram", "discord"):
+            c = cfg[ch]
+            if not c.get("enabled"):
+                continue
+            try:
+                body = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") if ch == "telegram" else text
+                await self.send(ch, c, ("ℹ️ " if ch == "telegram" else "ℹ️ ") + body)
+            except Exception as e:
+                log.warning("announcement via %s failed: %s", ch, e)
 
     async def send(self, ch: str, c: dict, text: str):
         v = st.store.vault
