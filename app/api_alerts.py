@@ -75,6 +75,17 @@ async def summary():
             "last_run": st.engine.last_run, "last_error": st.engine.last_error, "interval": st.s.alert_interval}
 
 
+@router.post("/alerts/drift/accept")
+async def drift_accept(request: Request, body: dict = Body(...)):
+    """'Accept change' on a changed-outside-the-dashboard alert."""
+    from . import history
+    need(request, "operator")
+    where = str(body.get("where", ""))
+    history.accept(st, where)
+    audit(request, "config change accepted", where, True, "changed outside the dashboard; accepted as the known version")
+    return {"ok": True}
+
+
 @router.post("/alerts/{aid}/ack")
 async def ack(request: Request, aid: int, body: dict = Body(default={})):
     need(request, "operator")
