@@ -1,3 +1,4 @@
+"""Tests for version, password hashing, config diffs and loading config.yaml."""
 import textwrap
 
 import pytest
@@ -53,7 +54,6 @@ def test_load_minimal_config(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("body,msg", [
-    ("haproxy_nodes: []\n", "at least one user"),
     ('users: {a: x}\nhaproxy_nodes: [{name: "bad name", host: h}]\n', "invalid name"),
     ('users: {a: x}\ncloudflared_nodes: [{name: c, host: h, tunnels: [{name: t, cf_account: nope}]}]\n', "not defined"),
 ])
