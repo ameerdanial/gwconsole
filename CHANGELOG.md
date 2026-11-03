@@ -25,6 +25,24 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
   and DNS read/edit without changing anything), nodes with host-key scan + fingerprint confirmation
   and an SSH test, notifications, general settings.
 - CLI: `gwconsole create-admin`, `reset-password <user>`, `users`.
+- **Easier installation**: `install.sh` checks the host first (root, systemd, Python, free port,
+  clock, Cloudflare reachable), then asks for the listen address, port and the first admin login
+  (Enter keeps the default), offers to open the port in ufw/firewalld, starts the service, waits
+  until it answers and prints the URL. Unattended: `--yes --admin --port --listen` with the password
+  in `GWC_ADMIN_PASSWORD`. Works on any systemd host — VM, LXC or bare metal — Debian/Ubuntu (apt)
+  and RHEL/Rocky/Alma/Fedora (dnf, Python 3.11 installed when the system one is too old).
+- **Setup wizard** in the browser after a fresh install: Nodes → Cloudflare → Alerts → Done.
+  Every step can be skipped; reopen it from Settings → General.
+- **"Use the node's password once"** when adding a node: the dashboard logs in one time over the
+  pinned host key, installs its SSH key (accepted only from the dashboard's IP), `socat` and the
+  HAProxy admin socket, checks the key works and forgets the password (never stored or logged).
+  Works with root or a sudo user; falls back to that user + passwordless sudo when root can't log in.
+- The other option shows a one-line command to paste on the node:
+  `curl -fsSL http://<dashboard>/prepare-node.sh | bash -s -- --key … --from …`.
+- **Fix it button** for a missing or read-only HAProxy stats socket (HAProxy page and the node test):
+  adds `stats socket … level admin` through the safe-apply path and installs `socat`.
+- `gwconsole upgrade [vX.Y.Z]`: fetches tags, shows the new version's changelog, asks, backs up and
+  upgrades. `gwconsole status`: version, service state and URL.
 
 ### Changed
 - Users, nodes, Cloudflare accounts and settings now live in a SQLite database
@@ -35,6 +53,9 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
   `/etc/gwconsole/secret.key`, created by `install.sh`.
 - Nodes added in the UI pin their SSH host key; existing nodes keep using `known_hosts` until edited.
 - `install.sh` backs up `/etc/gwconsole` and the database to `/var/backups/gwconsole/` before upgrading.
+- `prepare-node.sh` asks for the key and dashboard IP when they aren't given, detects HAProxy and
+  cloudflared by itself (`--haproxy` is no longer needed), supports dnf, a non-root `--user` with
+  passwordless sudo, and offers to add the admin stats socket (RHEL's `/var/lib/haproxy` included).
 - Web UI JavaScript split into one file per page under `app/static/js/`.
 - Git history rewritten so every file has its own descriptive commit; the `v1.1.0` tag was
   recreated (same code). Existing clones: `git fetch --tags --force`.
