@@ -2,6 +2,18 @@
  * reload/restart, logs, and "Edit config" which opens the side-panel editor. */
 "use strict";
 
+// shared with Settings → Nodes: add / fix the admin stats socket (safe apply on the node)
+async function fixStatsSocket(node) {
+  const ok = await confirmBox(`Set up the admin stats socket on ${node}?`,
+    `<p>Adds <code>stats socket … mode 660 level admin</code> to the <code>global</code> section of haproxy.cfg
+      (or raises an existing socket to <code>level admin</code>) and installs <code>socat</code> if it's missing.</p>
+     <p>Same safe path as the editor: <code>haproxy -c</code> first, a backup, a graceful reload, automatic rollback on failure.</p>`, "Fix it");
+  if (!ok) return null;
+  const r = await api(`/api/haproxy/${encodeURIComponent(node)}/fix-socket`, { body: {} });
+  showOutput(r.ok ? "Stats socket ready" : "Stats socket not fixed", r);
+  return r;
+}
+
 PAGES.haproxy = {
   every: 5,
   mount(v, params) {
@@ -9,12 +21,12 @@ PAGES.haproxy = {
     const cur = params[0] || nodes[0]?.name;
     S.cache.hpNode = cur;
     setHeader("HAProxy", "Live runtime stats · server state · service control");
-    if (!nodes.length) { v.innerHTML = `<div class="panel"><div class="empty">No HAProxy nodes in config.yaml.</div></div>`; return; }
+    if (!nodes.length) { v.innerHTML = `<div class="panel"><div class="empty">No HAProxy nodes yet.${S.role === "superadmin" ? ` <a href="#/settings/nodes">Add one in Settings → Nodes</a>.` : ""}</div></div>`; return; }
     v.innerHTML = `<div class="row">${nodes.length > 1 ? `<div class="seg">${nodes.map((n) => `<button class="${n.name === cur ? "on" : ""}" data-node="${esc(n.name)}">${esc(n.name)}${n.site ? ` · ${esc(n.site)}` : ""}</button>`).join("")}</div>` : ""}
         <div class="grow"></div><input type="search" id="hpFilter" placeholder="Filter backends / servers…" value="${esc(S.cache.hpFilter || "")}"></div>
       <div class="panel" id="hpHead"><div class="empty">Loading…</div></div>
       <div class="panel"><div class="hd"><h2>Frontends</h2></div><div class="bd flush tbl-wrap" id="hpFe"></div></div>
-      <div class="panel"><div class="hd"><h2>Backends & servers</h2><span class="meta">State changes are runtime-only (lost on restart). Use Config to make them permanent.</span></div><div class="bd flush tbl-wrap" id="hpBe"></div></div>`;
+      <div class="panel"><div class="hd"><h2>Backends & servers</h2><span class="meta">State changes are runtime-only (lost on restart). Use Edit config to make them permanent.</span></div><div class="bd flush tbl-wrap" id="hpBe"></div></div>`;
     v.addEventListener("click", (e) => this.onClick(e));
     $("#hpFilter").addEventListener("input", (e) => { S.cache.hpFilter = e.target.value; if (S.cache.hp) this.renderBe(S.cache.hp); });
   },
@@ -34,7 +46,9 @@ PAGES.haproxy = {
         <dt>Sess rate</dt><dd>${fmt.n(i.SessRate)}/s</dd><dt>Total req</dt><dd>${fmt.n(i.CumReq)}</dd>
         <dt>Threads</dt><dd>${esc(i.Nbthread || "–")}</dd><dt>Idle</dt><dd>${i.Idle_pct != null ? esc(i.Idle_pct) + "%" : "–"}</dd>
         <dt>Service since</dt><dd>${esc(d.service.since || "–")}</dd></dl>
-        ${d.stats_error ? `<div class="out bad" style="margin-top:12px">${esc(d.stats_error)}</div>` : ""}</div>`;
+        ${d.stats_error ? `<div class="out bad" style="margin-top:12px">${esc(d.stats_error)}</div>
+          <div class="row op" style="margin-top:8px"><button class="btn sm pri" data-act="fixsock">Set up the stats socket for me</button>
+          <span class="muted small">validated, backed up, rolled back on error</span></div>` : ""}</div>`;
     $("#hpFe").innerHTML = d.frontends.length ? `<table><thead><tr><th>Frontend</th><th>Status</th><th>Mode</th><th class="num">Sessions</th><th class="num">Rate/s</th><th class="num">Req/s</th>
       <th class="num">In</th><th class="num">Out</th><th class="num">2xx</th><th class="num">4xx</th><th class="num">5xx</th><th class="num">Req err</th></tr></thead><tbody>
       ${d.frontends.map((f) => `<tr><td><b>${esc(f.name)}</b></td><td>${pill(srvClass(f.status), f.status)}</td><td>${esc(f.mode)}</td>
@@ -72,6 +86,11 @@ PAGES.haproxy = {
     if (!b) return;
     const node = S.cache.hpNode;
     if (b.dataset.act === "edit") return Editor.open("haproxy", node);
+    if (b.dataset.act === "fixsock") {
+      busy(b, true);
+      try { await fixStatsSocket(node); } catch (err) { toast(err.message, "bad"); } finally { busy(b, false); refresh(); }
+      return;
+    }
     if (b.dataset.act === "logs") {
       return showLogs(`HAProxy logs · ${node}`, (src, n) => api(`/api/haproxy/${encodeURIComponent(node)}/logs?source=${src}&lines=${n}`), [["service", "service"], ["access", "access log"]]);
     }
