@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+
+# Build output
+dist/
+*.tar.gz
+
+# Never commit real configs or secrets
+config.yaml
+/env
+*.env
+.env
+id_ed25519*
+known_hosts
+*.pem
+*.key
+audit.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
