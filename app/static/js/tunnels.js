@@ -23,7 +23,7 @@ PAGES.tunnels = {
       return `<div class="panel"><div class="hd"><h2>${esc(n.node)}</h2><span class="meta mono">${esc(n.host)}</span>${n.site ? `<span class="tag">${esc(n.site)}</span>` : ""}<span class="meta">${esc(n.version)}</span>
           <div class="acts"><button class="btn sm pri op" data-act="new" data-node="${esc(n.node)}">+ New tunnel</button></div></div>
         <div class="bd" style="display:flex;flex-direction:column;gap:14px">${n.tunnels.map((t) => this.tunnel(n, t)).join("") || `<div class="empty">No cloudflared services found on this node.</div>`}</div></div>`;
-    }).join("") || `<div class="panel"><div class="empty">No cloudflared nodes in config.yaml.</div></div>`;
+    }).join("") || `<div class="panel"><div class="empty">No cloudflared nodes yet.${S.role === "superadmin" ? ` <a href="#/settings/nodes">Add one in Settings → Nodes</a>.` : ""}</div></div>`;
     const um = d.unmanaged || [];
     $("#tunUnmanaged").innerHTML = um.length ? `<div class="panel"><div class="hd"><h2>In Cloudflare, not on a managed node</h2>
         <span class="meta">Tunnels in your accounts that no managed cloudflared runs. Live ones run somewhere else (another server / site).</span></div>
@@ -135,7 +135,7 @@ PAGES.tunnels = {
   async newTunnel(node) {
     const inv = S.inv.cloudflared.find((x) => x.name === node) || {};
     const accs = S.inv.cf_accounts;
-    if (!accs.length) return toast("Add a Cloudflare account (with API token) in config.yaml first.", "bad");
+    if (!accs.length) return toast("Add a Cloudflare account (with an API token) in Settings → Cloudflare first.", "bad");
     const changed = await taskModal({
       title: `New tunnel on ${node}`, submit: "Create tunnel", size: "",
       html: `<div class="two"><label>Tunnel name<input name="name" type="text" placeholder="sw-tunnel" pattern="[a-z0-9][a-z0-9\\-]{0,38}[a-z0-9]" required autocomplete="off"><div class="hint">lowercase, digits, dashes</div></label>
