@@ -201,6 +201,8 @@ async function boot() {
   $("#app").classList.remove("hidden");
   if (me.must_change) { await forcePasswordChange(); return; }
   S.inv = await api("/api/inventory");
+  // fresh install: walk the superadmin through nodes → Cloudflare → alerts (no extra hashchange)
+  if (me.setup && !/^#\/setup/.test(location.hash)) history.replaceState(null, "", "#/setup");
   route();
   updateBadge();
   clearInterval(S.summaryTimer);
