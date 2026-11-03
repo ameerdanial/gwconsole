@@ -1,3 +1,5 @@
+# systemd unit for Gateway Console: runs the dashboard as the unprivileged gwconsole user
+# with a hardened sandbox. Installed to /etc/systemd/system/ by install.sh.
 [Unit]
 Description=Gateway Console (HAProxy + cloudflared dashboard)
 After=network-online.target
