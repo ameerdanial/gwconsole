@@ -11,10 +11,11 @@ import secrets
 import time
 
 from .auth import hash_password, verify_password
-from .config import NAME_RE, CFAccount, CloudflaredNode, HAProxyNode, Settings, Tunnel
+from .config import NAME_RE, CFAccount, CloudflaredNode, HAProxyNode, ServerNode, Settings, Tunnel
 from .db import DB
 from .vault import Vault
 
+NODE_CLASSES = {"haproxy": HAProxyNode, "cloudflared": CloudflaredNode, "server": ServerNode}
 ROLES = ("viewer", "operator", "superadmin")
 ROLE_LEVEL = {r: i for i, r in enumerate(ROLES)}
 USER_RE = re.compile(r"^[A-Za-z0-9_.@-]{2,48}$")
@@ -35,8 +36,31 @@ GENERAL_DEFAULTS = {
     "signin_alerts": True,         # message on sign-in from a new IP and on failed-login bursts
     "allowed_networks": "",        # sign-in only from these CIDRs ("" = anywhere)
     "drift_check": True,           # alert when a config file is changed outside the dashboard
+    # v1.4
+    "update_notify": True,         # message Telegram/Discord when a new dashboard version is out
 }
-BOOL_SETTINGS = {"update_check", "auto_update_patch", "nightly_backup", "signin_alerts", "drift_check"}
+BOOL_SETTINGS = {"update_check", "auto_update_patch", "nightly_backup", "signin_alerts", "drift_check", "update_notify"}
+MONITOR_DEFAULTS = {               # v1.4: Settings → Monitoring
+    "check_every": 60,              # seconds between site checks
+    "health_every": 60,             # seconds between server health reads
+    "down_after": 3,                # failed checks in a row before a site is "down"
+    "slow_ms": 1500,                # slower than this = "slow" (per-site override)
+    "disk_warn": 80, "disk_crit": 90,
+    "mem_crit": 95,
+    "load_factor": 2.0, "load_minutes": 10,     # load above factor × cores for N minutes
+    "err5xx_pct": 5, "err5xx_min": 50, "err5xx_minutes": 5,
+    "cert_warn": 14, "cert_crit": 3,
+    "keep_raw_hours": 48, "keep_15m_days": 30, "keep_daily_days": 365,
+    "summary_enabled": True, "summary_day": 0, "summary_time": "09:00",
+    "summary_tz": "Asia/Kuala_Lumpur", "summary_telegram": True, "summary_discord": True,
+}
+MONITOR_LIMITS = {
+    "check_every": (30, 3600), "health_every": (30, 3600), "down_after": (1, 20), "slow_ms": (100, 60000),
+    "disk_warn": (10, 100), "disk_crit": (10, 100), "mem_crit": (10, 100), "load_factor": (0.5, 20),
+    "load_minutes": (1, 120), "err5xx_pct": (0.1, 100), "err5xx_min": (1, 100000), "err5xx_minutes": (1, 120),
+    "cert_warn": (1, 365), "cert_crit": (0, 365), "keep_raw_hours": (6, 336), "keep_15m_days": (1, 365),
+    "keep_daily_days": (30, 3650), "summary_day": (0, 6),
+}
 NOTIFY_DEFAULTS = {
     "telegram": {"enabled": False, "bot_token_enc": "", "chat_id": "", "min_severity": "warn", "recoveries": True},
     "discord": {"enabled": False, "webhook_enc": "", "min_severity": "warn", "recoveries": True},
@@ -250,6 +274,46 @@ class Store:
         self.put("general", g)
         return g
 
+    def monitor_cfg(self) -> dict:
+        m = dict(MONITOR_DEFAULTS)
+        m.update(self.get("monitor", {}) or {})
+        return m
+
+    def set_monitor(self, patch: dict) -> dict:
+        m = self.monitor_cfg()
+        for k, v in patch.items():
+            if k not in MONITOR_DEFAULTS:
+                raise ValueError(f"unknown setting {k}")
+            d = MONITOR_DEFAULTS[k]
+            if isinstance(d, bool):
+                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            elif k == "summary_time":
+                v = str(v).strip()
+                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+                    raise ValueError("summary time must be HH:MM (24-hour)")
+            elif k == "summary_tz":
+                v = str(v).strip()
+                try:
+                    from zoneinfo import ZoneInfo
+                    ZoneInfo(v)
+                except Exception:
+                    raise ValueError(f"unknown time zone {v!r} (e.g. Asia/Kuala_Lumpur)")
+            else:
+                try:
+                    v = float(v) if isinstance(d, float) else int(float(v))
+                except (TypeError, ValueError):
+                    raise ValueError(f"{k} must be a number")
+                lo, hi = MONITOR_LIMITS[k]
+                if not lo <= v <= hi:
+                    raise ValueError(f"{k} must be between {lo} and {hi}")
+            m[k] = v
+        if m["disk_crit"] < m["disk_warn"]:
+            raise ValueError("disk critical must be at least the warning level")
+        if m["cert_crit"] > m["cert_warn"]:
+            raise ValueError("certificate critical days must be fewer than warning days")
+        self.put("monitor", m)
+        return m
+
     def notify_cfg(self) -> dict:
         n = copy.deepcopy(NOTIFY_DEFAULTS)
         stored = self.get("notify", {}) or {}
@@ -298,7 +362,7 @@ class Store:
     # ---------------------------------------------------------------- nodes
     @staticmethod
     def _node_obj(kind: str, name: str, data: dict):
-        cls = HAProxyNode if kind == "haproxy" else CloudflaredNode
+        cls = NODE_CLASSES[kind]
         fields = {f.name for f in dataclasses.fields(cls)}
         kw = {k: v for k, v in data.items() if k in fields and k != "name"}
         if kind == "cloudflared":
@@ -320,8 +384,8 @@ class Store:
         return out
 
     def save_node(self, kind: str, obj, old_name: str | None = None):
-        if kind not in ("haproxy", "cloudflared"):
-            raise ValueError("kind must be haproxy or cloudflared")
+        if kind not in NODE_CLASSES:
+            raise ValueError("kind must be haproxy, cloudflared or server")
         if not NAME_RE.match(obj.name or ""):
             raise ValueError("node name: letters, digits, _ . - only")
         data = dataclasses.asdict(obj)
@@ -334,6 +398,9 @@ class Store:
             if not self.db.x("UPDATE nodes SET name=?, kind=?, data=?, updated_at=? WHERE name=?",
                              (obj.name, kind, json.dumps(data), t, old_name)):
                 raise KeyError(f"node {old_name} not found")
+            if obj.name != old_name:
+                self.db.x("UPDATE services SET node=? WHERE node=?", (obj.name, old_name))
+                self.db.x("DELETE FROM health WHERE node=?", (old_name,))
         else:
             if clash:
                 raise ValueError(f"node {obj.name} already exists")
@@ -343,6 +410,8 @@ class Store:
     def delete_node(self, name: str):
         if not self.db.x("DELETE FROM nodes WHERE name=?", (name,)):
             raise KeyError(f"node {name} not found")
+        self.db.x("DELETE FROM services WHERE node=?", (name,))
+        self.db.x("DELETE FROM health WHERE node=?", (name,))
 
     # ---------------------------------------------------------------- import + runtime
     def import_from_yaml(self, y: Settings) -> dict | None:
@@ -381,6 +450,7 @@ class Store:
         s = copy.copy(base)
         s.haproxy_nodes = self.nodes("haproxy")
         s.cloudflared_nodes = self.nodes("cloudflared")
+        s.server_nodes = self.nodes("server")
         s.cf_accounts = {}
         for r in self.db.q("SELECT name FROM cf_accounts ORDER BY name"):
             s.cf_accounts[r["name"]] = self.cf_account(r["name"])
