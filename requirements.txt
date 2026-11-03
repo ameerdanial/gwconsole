@@ -1,6 +1,8 @@
+# Python packages the dashboard needs (installed into /opt/gwconsole/venv by install.sh)
 fastapi>=0.110
 uvicorn>=0.29
 asyncssh>=2.14
 httpx>=0.27
 PyYAML>=6.0
 ruamel.yaml>=0.18
+cryptography>=41
