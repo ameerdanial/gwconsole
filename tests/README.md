@@ -16,3 +16,4 @@ CI runs the same suite on Python 3.11, 3.12 and 3.13 for every push and pull req
 | `test_hpcfg.py` | HAProxy config model: parsing, unchanged saves change nothing, in-place edits, rules, rename/delete protection, validation, real `haproxy -c` |
 | `test_system.py` | Backups (encryption, restore safety), root helper requests, changelog sections, config history, update/backup APIs, sign-in security |
 | `test_setup.py` | HAProxy admin-socket fixer, setup wizard API, public health/script endpoints, password-once input checks, `create-admin --password-stdin` |
+| `test_monitor.py` | Database upgrade to v1.4, Server nodes, Settings → Monitoring, health parsing, routes through HAProxy, kept server state, monitoring alerts and API, HAProxy counter history, Cloudflare traffic parsing and the Traffic API, release notes |
