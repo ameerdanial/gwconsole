@@ -1,6 +1,6 @@
 <!doctype html>
 <!-- Gateway Console web UI — page shell: login form, sidebar, header and the page container.
-     Scripts in js/ are loaded in order: core → editor → pages (settings before setup) → app (starts the app). -->
+     Scripts in js/ are loaded in order: core → charts → editor → pages (settings before setup) → app (starts the app). -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -25,8 +25,10 @@
       <div class="brand">GW<b>//</b>CONSOLE<small>Gateway control</small></div>
       <nav class="nav" id="nav">
         <a href="#/overview" data-p="overview">Overview</a>
+        <a href="#/monitoring" data-p="monitoring">Monitoring</a>
+        <a href="#/traffic" data-p="traffic">Traffic</a>
+        <a href="#/tunnels" data-p="tunnels">CF Tunnels</a>
         <a href="#/haproxy" data-p="haproxy">HAProxy</a>
-        <a href="#/tunnels" data-p="tunnels">Tunnels</a>
         <a href="#/alerts" data-p="alerts">Alerts <span class="count hidden" id="alertCount"></span></a>
         <a href="#/activity" data-p="activity">Activity</a>
         <a href="#/settings" data-p="settings" id="navSettings" class="hidden">Settings</a>
@@ -55,11 +57,14 @@
 
   <div class="toasts" id="toasts"></div>
   <script src="/static/js/core.js"></script>
+  <script src="/static/js/charts.js"></script>
   <script src="/static/js/editor.js"></script>
   <script src="/static/js/overview.js"></script>
+  <script src="/static/js/monitoring.js"></script>
+  <script src="/static/js/traffic.js"></script>
+  <script src="/static/js/tunnels.js"></script>
   <script src="/static/js/haproxy.js"></script>
   <script src="/static/js/hpform.js"></script>
-  <script src="/static/js/tunnels.js"></script>
   <script src="/static/js/alerts.js"></script>
   <script src="/static/js/activity.js"></script>
   <script src="/static/js/settings.js"></script>
