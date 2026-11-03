@@ -17,7 +17,7 @@ from fastapi import APIRouter, Body, Request
 
 from . import notify
 from .cfapi import Cloudflare
-from .config import CFAccount, CloudflaredNode, HAProxyNode
+from .config import CFAccount, CloudflaredNode, HAProxyNode, ServerNode
 from .inventory import Inventory
 from .sshpool import NodeError, SSHPool, scan_host_key
 from .state import COOKIE, audit, ip, need, st, user
@@ -199,11 +199,13 @@ async def cf_test(request: Request, body: dict = Body(...)):
 NODE_FIELDS = {
     "haproxy": ["config_path", "stats_socket", "backup_dir", "service", "haproxy_bin"],
     "cloudflared": ["cloudflared_bin", "tunnel_base_dir", "discover"],
+    "server": [],
 }
+NODE_CLASS = {"haproxy": HAProxyNode, "cloudflared": CloudflaredNode, "server": ServerNode}
 
 
 def _node_from_body(kind: str, body: dict, existing=None):
-    cls = HAProxyNode if kind == "haproxy" else CloudflaredNode
+    cls = NODE_CLASS[kind]
     base = dataclasses.asdict(existing) if existing else {f.name: f.default for f in dataclasses.fields(cls)
                                                           if f.default is not dataclasses.MISSING}
     if existing and kind == "cloudflared":
@@ -256,7 +258,8 @@ def _node_from_body(kind: str, body: dict, existing=None):
 
 
 def _find_node(name: str):
-    for kind, lst in (("haproxy", st.s.haproxy_nodes), ("cloudflared", st.s.cloudflared_nodes)):
+    for kind, lst in (("haproxy", st.s.haproxy_nodes), ("cloudflared", st.s.cloudflared_nodes),
+                      ("server", st.s.server_nodes)):
         for n in lst:
             if n.name == name:
                 return kind, n
@@ -436,7 +439,7 @@ async def node_create(request: Request, body: dict = Body(...)):
     need(request, "superadmin")
     kind = str(body.get("kind", ""))
     if kind not in NODE_FIELDS:
-        raise ValueError("kind must be haproxy or cloudflared")
+        raise ValueError("kind must be haproxy, cloudflared or server")
     if not str(body.get("host_key") or "").strip():
         raise ValueError("scan and confirm the host key first")
     obj = _node_from_body(kind, body)
@@ -475,7 +478,7 @@ async def node_test(request: Request, body: dict = Body(...)):
     else:
         kind = str(body.get("kind", ""))
         if kind not in NODE_FIELDS:
-            raise ValueError("kind must be haproxy or cloudflared")
+            raise ValueError("kind must be haproxy, cloudflared or server")
         existing = None
         if body.get("original"):
             _, existing = _find_node(str(body["original"]))
@@ -499,6 +502,10 @@ async def node_test(request: Request, body: dict = Body(...)):
                            f"{n.stats_socket} not found — add 'stats socket {n.stats_socket} mode 660 level admin' to global"})
             r = await pool.run(n, f"test -r {n.config_path} && echo ok")
             checks.append({"check": "config readable", "ok": r.ok, "detail": n.config_path})
+        elif kind == "server":
+            r = await pool.run(n, "systemctl --version | head -1; nproc; df -P / | tail -1")
+            checks.append({"check": "systemd and health readings", "ok": r.ok,
+                           "detail": r.text.splitlines()[0] if r.ok and r.text else (r.text or "failed")})
         else:
             r = await pool.run(n, f"{n.cloudflared_bin} --version | head -1")
             checks.append({"check": "cloudflared", "ok": r.ok, "detail": r.text})
