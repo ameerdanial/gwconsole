@@ -1,16 +1,16 @@
 # GW//CONSOLE — HAProxy + Cloudflare Tunnel dashboard
 
-One web UI to watch **and** manage the HAProxy VM and the cloudflared LXC.
-It runs in its own small LXC and talks to both nodes over SSH (key auth, no agents),
+One web UI to watch **and** manage your HAProxy and cloudflared gateways.
+It runs on any small Linux host (VM, LXC or bare metal) and talks to the gateway nodes over SSH (key auth, no agents),
 plus the Cloudflare API for edge health and DNS routes. A background checker records
 every alert and can message you on Telegram or Discord.
 
 ```
-            browser ──HTTP:8088──▶  gwconsole LXC  ──▶ Telegram / Discord (alerts)
+            browser ──HTTP:8088──▶  gwconsole host ──▶ Telegram / Discord (alerts)
                                      │  SSH (key, from= locked, host key pinned)
                     ┌────────────────┼──────────────────┐
                     ▼                                   ▼
-             HAProxy VM                          cloudflared-lxc
+           HAProxy node(s)                     cloudflared node(s)
    admin socket · haproxy.cfg · systemd    config.yml per tunnel · systemd units
                                      │
                                      └── HTTPS ──▶ api.cloudflare.com (tunnels, DNS)
@@ -78,13 +78,13 @@ New users and password resets get a temporary password that must be changed at f
 
 ## Install
 
-### 1. Dashboard LXC
-A small Debian 12/13 or Ubuntu LXC (1 vCPU, 512 MB is plenty) on the management network that can reach both gateways over SSH.
+Any Linux host with **systemd** works — a VM, an LXC or bare metal: Debian 12+, Ubuntu 22.04+, or RHEL / Rocky / Alma / Fedora (Python 3.10+ is installed for you; 3.11 on RHEL 8/9). 1 vCPU and 512 MB is plenty. It only needs to reach the gateway nodes over SSH, and `api.cloudflare.com` if you use the Cloudflare features.
 
-The repo is private, so the LXC pulls it with a read-only **deploy key** (it can't push and can't see your other repos):
+### 1. Get the code
+The repo is private, so the host pulls it with a read-only **deploy key** (it can't push and can't see your other repos):
 
 ```bash
-apt update && apt install -y git
+apt install -y git            # or: dnf install -y git
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/gwconsole_deploy -C "deploy@$(hostname)"
 cat ~/.ssh/gwconsole_deploy.pub
 #  → GitHub: repo → Settings → Deploy keys → Add deploy key (leave "Allow write access" OFF)
@@ -96,23 +96,51 @@ Host github-gwconsole
   IdentitiesOnly yes
 EOF
 git clone github-gwconsole:ameerdanial/gwconsole.git /root/gwconsole
-cd /root/gwconsole && git checkout v1.2.0      # deploy a tagged release
+cd /root/gwconsole && git checkout v1.2.0      # a tagged release
+```
+
+### 2. Run the installer
+```bash
 bash install.sh
-gwconsole create-admin ameer                   # your superadmin login
-systemctl start gwconsole                      # open http://<lxc-ip>:8088
+```
+It checks the host first (root, systemd, Python, free port, clock, Cloudflare reachable), then asks four things — **Enter keeps the default**:
+
+```
+==> a few questions (Enter keeps the default)
+    This host's addresses: 192.168.10.50. 0.0.0.0 listens on all of them.
+    Listen address: [0.0.0.0]
+    Web port: [8088]
+    Admin username: [admin] ameer
+    Admin password:                  (10+ characters, upper + lower case and a digit)
+    Repeat password:
+```
+If `ufw` or `firewalld` is active it offers to open the port. Then it installs, starts the service, waits until it answers and prints the address to open.
+
+Unattended (Ansible, cloud-init…): pass everything as options and the password through the environment, never as an argument:
+```bash
+GWC_ADMIN_PASSWORD='…' bash install.sh --yes --admin ameer --port 8088 [--listen 10.0.0.5] [--no-firewall]
 ```
 
-### 2. Add your nodes (in the browser)
-1. **Settings → Nodes** shows the exact `prepare-node.sh` command with this dashboard's SSH key. Run it once on each node as root (add `--haproxy` on the HAProxy VM). It allows the key from this dashboard only, installs `socat`, and checks the HAProxy admin socket.
-2. **+ Add node** → enter the IP → **Scan host key** → compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node → tick the box → **Test connection** → **Save**.
+### 3. Finish in the browser (setup wizard)
+Sign in and the dashboard walks you through three steps — skip any of them, all of it stays editable in **Settings**. Reopen the wizard any time from **Settings → General**.
 
-If HAProxy has no admin socket, add this under `global` in `haproxy.cfg` (you can do it in the dashboard's editor):
-```
-stats socket /run/haproxy/admin.sock mode 660 level admin
-```
+![Setup wizard](docs/setup-wizard.png)
 
-### 3. Cloudflare accounts
-**Settings → Cloudflare → + Add account**: a name, the Account ID and an API token. **Test before saving** shows which permissions the token has.
+**Nodes.** **+ Add node** → type, name, IP → **Scan host key** and compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node. Then choose how the dashboard gets in:
+
+- **Use the node's password once** (easiest): enter root's password, or a sudo user's. The dashboard logs in one time over the pinned host key, installs its SSH key (accepted only from the dashboard's IP), installs `socat`, sets up HAProxy's admin stats socket if it's missing (validated with `haproxy -c`, backed up, rolled back on error), proves the key works — and forgets the password. It's never stored or logged.
+  Debian and Ubuntu don't let root log in with a password by default; give a sudo user instead and the dashboard still connects as root with its key (or as that user with passwordless sudo, if root can't log in over SSH at all).
+- **Run a command on the node**: the form shows a one-liner to paste into a root shell on the node:
+  ```bash
+  curl -fsSL http://<dashboard>:8088/prepare-node.sh | bash -s -- --key "ssh-ed25519 AAAA… gwconsole@host" --from 192.168.10.50
+  ```
+  `prepare-node.sh` also runs on its own and asks for whatever is missing: `bash prepare-node.sh`.
+
+Saving runs a connection test. If an HAProxy node's admin socket goes missing later, **Settings → Nodes → Test** and the HAProxy page show a **Fix it** button that makes the same safe change.
+
+![Add node](docs/add-node.png)
+
+**Cloudflare** (optional): a name, the Account ID and an API token. **Test before saving** shows which permissions the token has.
 
 - **Account ID**: dash.cloudflare.com → click a domain → right-hand column, **API** box → **Account ID** (also the long code in the address bar).
 - **API token**: Profile → API Tokens → Create Custom Token:
@@ -125,30 +153,30 @@ stats socket /run/haproxy/admin.sock mode 660 level admin
 
 Tunnels are matched to their account automatically by the `tunnel:` ID in each `config.yml`.
 
-### 4. Notifications (optional)
-**Settings → Notifications**:
+**Alerts** (optional):
 - **Telegram**: create a bot with @BotFather (bot token), message the bot once, get your chat ID from @userinfobot (groups: add @RawDataBot; the ID starts with `-100`).
 - **Discord**: channel → Edit Channel → Integrations → Webhooks → New Webhook → Copy URL.
 
-Use **Send test**, then set **Settings → General → Dashboard URL** so each message links back to the Alerts page.
+Use **Send test**. The last step also saves the dashboard URL so each message links back here.
 
 ## Upgrading
 
 ```bash
-cd /root/gwconsole
-git fetch --tags --force               # --force is needed once: the v1.1.0 tag was recreated in 1.2.0
-git tag --sort=-v:refname | head       # available releases
-git checkout v1.2.0 && bash install.sh
+gwconsole upgrade            # fetch, show what's new, confirm, back up, upgrade, restart
+gwconsole upgrade v1.3.0     # a specific version
 ```
-`install.sh` stops the service, backs up `/etc/gwconsole` and the database to `/var/backups/gwconsole/` (last 10 kept), upgrades and starts it again. Read `CHANGELOG.md` before upgrading.
+It runs `git fetch --tags --force` in the folder you installed from, shows the newest release with its `CHANGELOG.md` notes and asks before doing anything. The upgrade itself is `install.sh`: it stops the service, backs up `/etc/gwconsole` and the database to `/var/backups/gwconsole/` (last 10 kept), upgrades, starts it again and asks no questions.
+
+By hand it's the same: `cd /root/gwconsole && git fetch --tags --force && git checkout vX.Y.Z && bash install.sh`.
 
 **From 1.1 to 1.2**: nothing to do by hand. On first start, the users, nodes and Cloudflare accounts in your old `config.yaml` (and tokens from `/etc/gwconsole/env`) are imported into the database once. You sign in with the same password. From then on, manage them in Settings; the old sections in `config.yaml` are ignored but left in place.
 
-**Rolling back**: `git checkout v1.1.0 && bash install.sh` works, because 1.1 still reads `config.yaml` (changes you made in the 1.2 Settings page are not carried back).
+**Rolling back**: `gwconsole upgrade v1.1.0` (or `git checkout v1.1.0 && bash install.sh`) works, because 1.1 still reads `config.yaml` (changes you made in the 1.2 Settings page are not carried back).
 
 ## Day-to-day
 
 ```bash
+gwconsole status                # version, service state and the URL to open
 gwconsole version               # installed version, e.g. "gwconsole 1.2.0 (v1.2.0)"
 gwconsole users                 # list users and roles
 gwconsole reset-password ameer  # locked out? set a new password (also re-enables the account)
@@ -184,13 +212,15 @@ Where things live:
 - Secrets never go in the repo: `config.yaml`, `env`, keys, `secret.key` and `known_hosts` are git-ignored.
 
 ## Adding the DR site later
-Run `prepare-node.sh` on the DR nodes, then **Settings → Nodes → + Add node** with a site label like `DR`. Every page handles multiple nodes.
+**Settings → Nodes → + Add node** for each DR node, with a site label like `DR`. Every page handles multiple nodes.
 
 ## Security notes
 - This tool can reload and restart your gateways. Only expose it on the management VLAN or Tailscale, never publicly.
 - Passwords are scrypt-hashed. Sessions are stored hashed in the database and survive restarts. 5 failed logins per IP lock that IP out for 5 minutes. Cookies are `HttpOnly` + `SameSite=Strict`, and every change also needs an `X-GWC` header.
 - Roles are enforced on the server for every request; hiding buttons in the UI is only a convenience.
 - The SSH key works only from the dashboard IP (`from=` in authorized_keys). Nodes added in Settings pin their host key; a changed key blocks the connection.
+- "Use the node's password once" sends the password only over that pinned-host-key SSH session and keeps it in memory for that one request: it's never written to the database, logs or audit trail. A sudo password goes to `sudo` on stdin, never on a command line.
+- `/prepare-node.sh` and `/api/health` are the only addresses served without a login; neither holds anything secret (the public key is passed as an argument).
 - Cloudflare tokens, the Telegram bot token and the Discord webhook are encrypted in the database with `secret.key` (root:gwconsole 640). The app runs as the unprivileged `gwconsole` user in a hardened systemd unit.
 
 ## Files
@@ -199,8 +229,8 @@ app/                  FastAPI backend + web UI (no build step, no CDN) — see a
 tests/                pytest suite — see tests/README.md
 docs/                 screenshots used in this README
 .github/workflows/    CI and release automation
-install.sh            installer / upgrader for the dashboard LXC
-prepare-node.sh       one-time setup on each managed node
+install.sh            interactive installer / upgrader for the dashboard host (any systemd Linux)
+prepare-node.sh       one-time setup on each managed node (also served by the dashboard)
 release.sh            cut a release (changelog, VERSION, tag)
 config.example.yaml   bootstrap config template
 gwconsole.service     systemd unit
