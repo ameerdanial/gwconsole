@@ -221,10 +221,12 @@ ok "gwconsole"
 if [ "$UPGRADE" = 1 ]; then
   step "backup before upgrade"
   systemctl stop gwconsole 2>/dev/null || true
-  mkdir -p "$BAK"; chmod 700 "$BAK"
+  mkdir -p "$BAK"; chown root:"$(id -gn gwconsole)" "$BAK"; chmod 750 "$BAK"
   TS=$(date +%Y%m%d-%H%M%S)
-  (umask 077; tar czf "$BAK/gwconsole-$OLD_VER-$TS.tar.gz" -C / etc/gwconsole $( [ -d "$VAR" ] && echo var/lib/gwconsole ) 2>/dev/null) || true
-  ls -1t "$BAK"/gwconsole-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f      # keep the last 10
+  (umask 027; tar czf "$BAK/gwconsole-$OLD_VER-$TS.tar.gz" -C / etc/gwconsole $( [ -d "$VAR" ] && echo var/lib/gwconsole ) 2>/dev/null) || true
+  chgrp gwconsole "$BAK/gwconsole-$OLD_VER-$TS.tar.gz" 2>/dev/null || true
+  # keep the last 10 upgrade backups (nightly gwconsole-backup-* files are pruned separately)
+  ls -1t "$BAK"/gwconsole-*.tar.gz 2>/dev/null | grep -v -e '/gwconsole-backup-' -e '/gwconsole-before-restore-' | tail -n +11 | xargs -r rm -f
   ok "$BAK/gwconsole-$OLD_VER-$TS.tar.gz"
 fi
 
@@ -232,7 +234,7 @@ step "application → $APP  ($OLD_VER → $NEW_VER)"
 mkdir -p "$APP"
 rm -rf "$APP/app"
 cp -r "$SRC/app" "$APP/"
-cp "$SRC/requirements.txt" "$SRC/VERSION" "$SRC/prepare-node.sh" "$APP/"
+cp "$SRC/requirements.txt" "$SRC/VERSION" "$SRC/prepare-node.sh" "$SRC/CHANGELOG.md" "$APP/"
 rm -f "$APP/BUILD" "$APP/SOURCE"
 if [ -d "$SRC/.git" ] && command -v git >/dev/null; then
   git -C "$SRC" describe --tags --always --dirty 2>/dev/null > "$APP/BUILD" || true
@@ -245,8 +247,10 @@ chown -R root:root "$APP"
 ok "python packages installed"
 
 step "configuration → $ETC"
-mkdir -p "$ETC" "$VAR"
-chown -R gwconsole:gwconsole "$VAR"; chmod 750 "$VAR"
+mkdir -p "$ETC" "$VAR" "$VAR/helper" /var/lib/gwconsole-helper "$BAK"
+chown -R gwconsole:gwconsole "$VAR"; chmod 750 "$VAR" "$VAR/helper"
+chown root:gwconsole /var/lib/gwconsole-helper "$BAK"; chmod 750 /var/lib/gwconsole-helper "$BAK"   # root writes, the app reads
+find "$BAK" -maxdepth 1 -name 'gwconsole-*.tar.gz' -exec chgrp gwconsole {} + -exec chmod 640 {} + 2>/dev/null || true
 if [ ! -f "$ETC/id_ed25519" ]; then
   ssh-keygen -q -t ed25519 -N '' -C "gwconsole@$(hostname)" -f "$ETC/id_ed25519"
   ok "created the dashboard SSH key"
@@ -330,6 +334,11 @@ case "${1:-}" in
     if [ $yes = 0 ]; then read -r -p "Upgrade to $want now? A backup is taken first. [y/N] " a; [ "$a" = y ] || [ "$a" = Y ] || { echo "not upgraded."; exit 0; }; fi
     git -C "$SRC" -c advice.detachedHead=false checkout --quiet "$want"
     exec bash "$SRC/install.sh" --upgrade ;;
+  backup)  need_root; shift; cd $APP; GWC_CONFIG=$ETC/config.yaml exec $APP/venv/bin/python -m app backup "$@" ;;
+  restore) need_root; [ -n "${2:-}" ] || { echo "usage: gwconsole restore <backup file>"; ls -1t /var/backups/gwconsole/*.tar.gz 2>/dev/null | head -5; exit 1; }
+           cd $APP; GWC_CONFIG=$ETC/config.yaml exec $APP/venv/bin/python -m app restore "$(readlink -f "$2")" ;;
+  allow-all) need_root; run allow-all ;;
+  helper)  need_root; shift; exec $APP/venv/bin/python -I $APP/app/helper.py "$@" ;;
   logs)    exec journalctl -u gwconsole -f ;;
   restart) need_root; systemctl restart gwconsole && systemctl --no-pager status gwconsole | head -5 ;;
   *) cat <<USAGE
@@ -341,6 +350,9 @@ usage: gwconsole <command>
   users                    list users and roles
   check                    test SSH to every node and every Cloudflare token
   pubkey                   print the dashboard's SSH public key (for prepare-node.sh)
+  backup                   back up settings, keys and the database now (/var/backups/gwconsole)
+  restore <file>           put a backup back (asks for the passphrase of a downloaded one)
+  allow-all                remove the "allowed networks" sign-in restriction (locked out?)
   logs | restart | version
 USAGE
      exit 1 ;;
@@ -351,9 +363,12 @@ ok "/usr/local/bin/gwconsole"
 
 step "systemd service"
 cp "$SRC/gwconsole.service" /etc/systemd/system/gwconsole.service
+cp "$SRC"/systemd/gwconsole-helper.path "$SRC"/systemd/gwconsole-helper.service \
+   "$SRC"/systemd/gwconsole-daily.service "$SRC"/systemd/gwconsole-daily.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable gwconsole >/dev/null 2>&1
-ok "enabled at boot"
+systemctl enable --now gwconsole-helper.path gwconsole-daily.timer >/dev/null 2>&1 || warn "could not enable the update/backup helper units"
+ok "enabled at boot (+ update helper and nightly backup)"
 
 if [ "$UPGRADE" = 0 ] && [ "${NEED_ADMIN:-0}" = 1 ]; then
   step "superadmin"
