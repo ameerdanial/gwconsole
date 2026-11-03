@@ -17,10 +17,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, cloudflared, configops, haproxy, tunnelops
+from . import __version__, cloudflared, configops, haproxy, history, tunnelops
 from .alerts import Engine
 from .api_admin import router as admin_router
 from .api_alerts import active_alerts, router as alerts_router
+from .api_haproxy import router as haproxy_router
+from .api_system import record_running_version, router as system_router, whatsnew_pending
 from .audit import Audit
 from .auth import Sessions
 from .cfapi import CFError, Cloudflare
@@ -30,7 +32,7 @@ from .db import DB
 from .inventory import Inventory
 from .sshpool import NodeError, SSHPool
 from .state import COOKIE, audit, ip, need, shielded, st, user
-from .store import Store
+from .store import Store, ip_allowed
 from .vault import Vault, VaultError
 
 STATIC = Path(__file__).parent / "static"
@@ -61,6 +63,8 @@ async def lifespan(app: FastAPI):
     st.locks = {}
     if not st.store.users():
         log.error("no users exist yet: run 'gwconsole create-admin' on this host")
+    record_running_version()
+    configops.ON_APPLIED = lambda node, path, content, stage: history.on_applied(st.store, base.db_path, node, path, content, stage)
     st.engine = Engine()
     if not getattr(app.state, "no_engine", False):
         st.engine.start()
@@ -76,6 +80,8 @@ app = FastAPI(title="Gateway Console", version=__version__, lifespan=lifespan, d
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 app.include_router(alerts_router)
 app.include_router(admin_router)
+app.include_router(haproxy_router)
+app.include_router(system_router)
 
 
 # ---- auth, roles & error handling ---------------------------------------------
@@ -83,6 +89,8 @@ app.include_router(admin_router)
 async def guard(request: Request, call_next):
     p = request.url.path
     if p.startswith("/api/") and p not in OPEN_PATHS:
+        if st.store and not ip_allowed(ip(request), st.store.general().get("allowed_networks", "")):
+            return JSONResponse({"error": "not allowed from this network"}, status_code=403)
         u = st.store.session(request.cookies.get(COOKIE))
         if not u:
             return JSONResponse({"error": "not logged in"}, status_code=401)
@@ -91,6 +99,7 @@ async def guard(request: Request, call_next):
         if u["must_change"] and p not in MUST_CHANGE_OK:
             return JSONResponse({"error": "change your password first", "must_change": True}, status_code=403)
         request.state.user = u
+        history.ACTOR.set(u["username"])
     resp = await call_next(request)
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Frame-Options"] = "DENY"
@@ -121,6 +130,10 @@ async def health():
 @app.post("/api/login")
 async def login(request: Request, body: dict = Body(...)):
     addr = ip(request)
+    g = st.store.general()
+    if not ip_allowed(addr, g.get("allowed_networks", "")):
+        st.audit.log(str(body.get("user", "?")), "login", "-", False, "address not in allowed networks", addr)
+        return JSONResponse({"error": "sign-in isn't allowed from this network"}, status_code=403)
     if st.logins.locked(addr):
         return JSONResponse({"error": "too many attempts, wait 5 minutes"}, status_code=429)
     name, pw = str(body.get("user", "")), str(body.get("password", ""))
@@ -129,7 +142,16 @@ async def login(request: Request, body: dict = Body(...)):
         st.logins.fail(addr)
         await asyncio.sleep(1)
         st.audit.log(name or "?", "login", "-", False, "", addr)
+        if st.logins.locked(addr) and g.get("signin_alerts", True):
+            asyncio.ensure_future(st.engine.announce(
+                f"Sign-in blocked: too many failed attempts from {addr} (last tried user '{name[:40]}'). That address is locked out for 5 minutes."))
         return JSONResponse({"error": "invalid credentials"}, status_code=401)
+    seen = st.store.get(f"seen_ips:{u['username']}", []) or []
+    if addr not in seen:
+        if seen and g.get("signin_alerts", True):
+            ua = request.headers.get("user-agent", "")[:80]
+            asyncio.ensure_future(st.engine.announce(f"New sign-in: {u['username']} from {addr}, an address not used before ({ua})."))
+        st.store.put(f"seen_ips:{u['username']}", ([addr] + seen)[:20])
     tok = st.store.create_session(u["id"], st.s.session_hours, addr, request.headers.get("user-agent", ""))
     st.store.touch_login(u["id"])
     st.audit.log(u["username"], "login", "-", True, "", addr)
@@ -152,7 +174,7 @@ async def me(request: Request):
     u = user(request)
     from .api_admin import setup_pending
     return {"user": u["username"], "role": u["role"], "must_change": u["must_change"], "version": __version__,
-            "setup": u["role"] == "superadmin" and setup_pending()}
+            "setup": u["role"] == "superadmin" and setup_pending(), "updated": whatsnew_pending(u["username"])}
 
 
 @app.get("/api/inventory")
@@ -531,6 +553,7 @@ async def cfg_apply(request: Request, kind: str, ref: str, body: dict = Body(...
     content = str(body.get("content", ""))
     if not content.endswith("\n"):
         content += "\n"
+    history.NOTE.set(str(body.get("note") or "")[:120])
     r = await tg.apply(content, body.get("base_hash"))
     if r["stage"] != "noop":
         note = str(body.get("note") or "")[:120]
