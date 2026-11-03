@@ -7,6 +7,8 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 |---|---|
 | `main.py` | App startup, login, role guard, and the gateway APIs (overview, HAProxy, tunnels, config editor, activity) |
 | `api_alerts.py` | Alerts API: active/history, acknowledge, mutes, CSV export, check now |
+| `api_haproxy.py` | HAProxy Add / Edit APIs: form model of every frontend and backend, dry-run plan (summary, checks, diff, `haproxy -c`), apply with optional Cloudflare publish and undo, reachability / free-port probes |
+| `api_system.py` | Version and What's new, update check / install through the root helper, backups (list, back up now, encrypted download), node software versions and cloudflared update, config history |
 | `api_admin.py` | Superadmin APIs: users, sessions, Cloudflare accounts, nodes (incl. "use the node's password once" setup), notifications, general settings, setup wizard; change own password |
 | `state.py` | Shared runtime state (settings, SSH pool, Cloudflare client, store) and role/audit helpers |
 | `collect.py` | Gathers live state from all nodes and Cloudflare, and turns it into alert rules |
@@ -19,7 +21,12 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 | `auth.py` | scrypt password hashing and the login brute-force guard |
 | `audit.py` | Append-only audit log (`audit.log`) |
 | `sshpool.py` | Persistent SSH connections to nodes, host-key pinning and scanning |
+| `history.py` | Config history (local git mirror of every managed config file) and "changed outside the dashboard" detection |
+| `backup.py` | Dashboard backups: consistent snapshot, passphrase encryption, safe restore, copy to a node |
+| `versions.py` | cloudflared / HAProxy versions on the nodes; cloudflared update with one-at-a-time tunnel restarts and rollback |
+| `helper.py` | Root-side helper run by systemd: update check, upgrade with automatic rollback, backups — only a fixed list of requests |
 | `configops.py` | Safe config apply: validate, backup, write, reload, health check, rollback; backup listing |
+| `hpcfg.py` | HAProxy config model: parses frontends/backends into form fields, keeps unknown lines, merges edits in place, references and validation |
 | `haproxy.py` | HAProxy: runtime stats via the admin socket, server state, reload/restart, config target, admin-socket fixer |
 | `cloudflared.py` | cloudflared: service status, ingress parsing, rule test, config target |
 | `inventory.py` | Auto-discovers cloudflared tunnels from systemd units on each node |
@@ -31,5 +38,6 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 | `static/js/core.js` | Helpers, API client, modals, roles, login and password flow, router |
 | `static/js/editor.js` | Config editor side panel with History tab |
 | `static/js/overview.js` · `haproxy.js` · `tunnels.js` · `alerts.js` · `activity.js` · `settings.js` | One file per page |
+| `static/js/hpform.js` | HAProxy "+ Add" / Edit side panel: Frontend, Backend and Cloudflare parts, tabs, live plan, checks and diff |
 | `static/js/setup.js` | First-run setup wizard: Nodes → Cloudflare → Alerts → Done (reuses the Settings forms) |
 | `static/js/app.js` | Entry point: starts the app |
