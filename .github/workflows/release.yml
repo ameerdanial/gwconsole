@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match VERSION
+        run: |
+          test "v$(cat VERSION)" = "${GITHUB_REF_NAME}" || { echo "VERSION file says $(cat VERSION), tag is ${GITHUB_REF_NAME}"; exit 1; }
+      - name: Build tarball
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix=gwconsole/ -o "dist/gwconsole-${GITHUB_REF_NAME}.tar.gz" "${GITHUB_REF_NAME}" -- . ':!docs' ':!tests' ':!.github'
+      - name: Release notes from CHANGELOG
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          cat notes.md
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz --title "${GITHUB_REF_NAME}" --notes-file notes.md
