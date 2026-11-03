@@ -13,7 +13,7 @@ const checksHtml = (rows, nameKey) => `<ul class="checks">${rows.map((r) => `<li
 
 PAGES.settings = {
   role: "superadmin",
-  tabs: [["users", "Users"], ["cloudflare", "Cloudflare"], ["nodes", "Nodes"], ["notifications", "Notifications"], ["general", "General"]],
+  tabs: [["users", "Users"], ["cloudflare", "Cloudflare"], ["nodes", "Nodes"], ["notifications", "Notifications"], ["backups", "Backups"], ["general", "General"], ["about", "About & updates"]],
   mount(v, params) {
     this.tab = this.tabs.some((t) => t[0] === params[0]) ? params[0] : "users";
     setHeader("Settings", "Superadmin only");
@@ -437,23 +437,190 @@ PAGES.settings = {
     if (S.page !== "settings") return;
     const g = d.settings;
     $("#setBody").innerHTML = `
-      <form class="panel" id="genForm"><div class="hd"><h2>General</h2></div><div class="bd form" style="max-width:640px">
+      <form class="panel" id="genForm"><div class="hd"><h2>General</h2></div><div class="bd form" style="max-width:680px">
         <label>Dashboard URL<input name="dashboard_url" type="text" value="${esc(g.dashboard_url)}" placeholder="http://192.168.10.50:8088"><div class="hint">Used for links in Telegram/Discord messages.</div></label>
         <div class="two"><label>Sign-in lasts (hours)<input name="session_hours" type="text" value="${g.session_hours}"></label>
           <label>Check alerts every (seconds)<input name="alert_interval" type="text" value="${g.alert_interval}"></label></div>
         <div class="two"><label>Keep alert history (days)<input name="alert_retention_days" type="text" value="${g.alert_retention_days}"></label>
           <label>Config backups kept per file<input name="keep_backups" type="text" value="${g.keep_backups}"></label></div>
+        <label class="check"><input type="checkbox" name="drift_check" ${g.drift_check ? "checked" : ""}> Alert when a config file is changed outside the dashboard (checked every 15 minutes)</label>
+        <div class="sep">Sign-in security</div>
+        <label class="check"><input type="checkbox" name="signin_alerts" ${g.signin_alerts ? "checked" : ""}> Message me (Telegram/Discord) on a sign-in from a new address, and when an address is locked out after failed attempts</label>
+        <label>Allow sign-in only from these networks<input name="allowed_networks" type="text" value="${esc(g.allowed_networks)}" placeholder="anywhere — e.g. 192.168.10.0/24, 100.64.0.0/10">
+          <div class="hint">Comma-separated addresses or networks. Empty = anywhere. Your current address must be in the list. Locked out? On the server: <code>gwconsole allow-all</code></div></label>
         <div class="row"><button class="btn pri" type="submit">Save</button><span class="grow"></span><a class="btn" href="#/setup">Run the setup wizard again</a></div></div></form>
-      <div class="panel"><div class="hd"><h2>About</h2></div><div class="bd"><dl class="kv">
-        <dt>Version</dt><dd>v${esc(d.version)}</dd><dt>Database</dt><dd class="mono small">${esc(d.db_path)}</dd>
+      <div class="panel"><div class="hd"><h2>System</h2></div><div class="bd"><dl class="kv">
+        <dt>Database</dt><dd class="mono small">${esc(d.db_path)}</dd>
         <dt>Alert checker</dt><dd>${d.engine.last_run ? `last run ${esc(fmt.ago(d.engine.last_run))}` : "not run yet"}${d.engine.last_error ? ` · <span style="color:var(--crit)">${esc(d.engine.last_error)}</span>` : ""}</dd>
         ${d.imported && (d.imported.users || d.imported.nodes || d.imported.cf_accounts) ? `<dt>Imported</dt><dd>from config.yaml on ${esc(fmt.time(d.imported.at))}</dd>` : ""}</dl></div></div>`;
     $("#genForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const fd = Object.fromEntries(new FormData(e.target).entries());
+      ["drift_check", "signin_alerts"].forEach((k) => (fd[k] = $(`[name=${k}]`, e.target).checked));
       try { await api("/api/admin/general", { method: "PUT", body: fd }); toast("Saved", "ok"); this.general(); }
       catch (err) { toast(err.message, "bad"); }
     });
+  },
+
+  // ============================================================ ABOUT & UPDATES
+  async about() {
+    const [d, v, h] = await Promise.all([api("/api/system"), api("/api/versions").catch((e) => ({ error: e.message, items: [] })),
+      api("/api/admin/config-history?limit=30").catch(() => ({ items: [] }))]);
+    if (S.page !== "settings" || this.tab !== "about") return;
+    const u = d.update || {};
+    const avail = u.available || [];
+    const running = u.state === "running";
+    const sw = (v.items || []).map((x) => `<tr><td><b>${esc(x.node)}</b></td><td>${x.kind === "haproxy" ? "HAProxy" : "cloudflared"}</td>
+        <td class="mono small">${esc(x.installed || "–")}</td>
+        <td class="mono small">${esc(x.kind === "haproxy" ? (x.candidate || "–") : (x.latest || "–"))}${x.latest_error ? ` <span class="muted">(${esc(x.latest_error)})</span>` : ""}</td>
+        <td>${x.error ? pill("crit", "unreachable") : x.update ? pill("warn", "update available") : pill("ok", "up to date")}</td>
+        <td>${x.kind === "cloudflared" && x.update ? `<button class="btn sm op" data-a="cfdupdate" data-name="${esc(x.node)}">Update cloudflared</button>`
+          : x.kind === "haproxy" && x.update ? `<span class="muted small">update through the OS in a maintenance window</span>` : ""}</td></tr>`).join("");
+    $("#setBody").innerHTML = `
+      <div class="panel"><div class="hd"><h2>Gateway Console</h2><span class="meta">v${esc(d.version)}${d.build && d.build !== `v${d.version}` ? ` · ${esc(d.build)}` : ""}${d.source === "tarball" ? " · installed from a tarball" : ""}</span>
+        <div class="acts"><button class="btn sm" data-a="updcheck" ${running ? "disabled" : ""}>Check for updates</button></div></div>
+        <div class="bd">
+          ${running ? `<div class="out">Updating to ${esc(u.target)}… <button class="btn sm" data-a="updwatch">Show progress</button></div>` : ""}
+          ${u.state && u.state !== "running" && u.message ? `<div class="out ${u.state === "done" ? "ok" : "bad"}">${esc(u.message)}${u.state !== "done" ? ` <button class="btn sm" data-a="updwatch">Show log</button>` : ""}</div>` : ""}
+          ${u.error ? `<div class="out bad">${esc(u.error)}</div>` : ""}
+          <div class="small muted" style="margin-bottom:10px">${u.checked_at ? `Last checked ${esc(fmt.ago(u.checked_at))}${u.checked_by && u.checked_by !== "schedule" ? ` by ${esc(u.checked_by)}` : " (nightly)"}.` : "Not checked yet."}
+            ${d.pending ? ` <b>Waiting for the helper service…</b>` : ""}</div>
+          ${avail.length ? avail.map((a, i) => `<div class="card upd"><div class="t">${esc(a.version)} ${a.date ? `<span class="muted small">${esc(a.date)}</span>` : ""}
+              ${i === 0 ? `<span class="r"><button class="btn sm pri" data-a="updinstall" data-v="${esc(a.version)}" ${running ? "disabled" : ""}>Update to ${esc(a.version)}</button></span>` : ""}</div>
+              <div class="md">${mdLite(a.notes.replace(/^## .*\n?/, ""))}</div></div>`).join("")
+            : `<div class="empty ok" style="padding:14px">${u.checked_at ? "You're on the newest version." : "Click “Check for updates”."}</div>`}
+          <div class="row" style="margin-top:12px;gap:18px"><label class="check"><input type="checkbox" data-gs="update_check" ${d.settings?.update_check ? "checked" : ""}> Check every night</label>
+            <label class="check"><input type="checkbox" data-gs="auto_update_patch" ${d.settings?.auto_update_patch ? "checked" : ""}> Install bug-fix releases (x.y.<b>Z</b>) automatically</label></div>
+          <div class="muted small">An update backs up settings and the database first. If the new version doesn't start, it goes back to this one automatically.</div>
+        </div></div>
+      <div class="panel"><div class="hd"><h2>What's new in v${esc(d.version)}</h2></div><div class="bd md">${mdLite((d.whatsnew || "").replace(/^## .*\n?/, "")) || `<span class="muted">No notes.</span>`}</div></div>
+      <div class="panel"><div class="hd"><h2>Software on your nodes</h2><span class="meta">cloudflared vs the latest Cloudflare release · HAProxy vs your OS packages</span></div>
+        <div class="bd flush tbl-wrap"><table><thead><tr><th>Node</th><th>Software</th><th>Installed</th><th>Available</th><th></th><th></th></tr></thead>
+        <tbody>${sw || `<tr><td colspan="6" class="empty">${esc(v.error || "No nodes.")}</td></tr>`}</tbody></table></div></div>
+      <div class="panel"><div class="hd"><h2>Config history</h2><span class="meta">Every change to haproxy.cfg and tunnel configs — from the dashboard or made outside it</span></div>
+        <div class="bd flush tbl-wrap"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th></th></tr></thead><tbody>
+        ${(h.items || []).map((c) => `<tr><td class="small">${esc(fmt.short(c.at))}</td><td>${c.author === "outside the dashboard" ? pill("warn", "outside the dashboard") : esc(c.author)}</td>
+          <td class="small">${esc(c.subject)}</td><td><button class="btn sm" data-a="histshow" data-id="${esc(c.id)}">Show</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">Nothing recorded yet — the first copy is taken at the next check.</td></tr>`}
+        </tbody></table></div></div>`;
+    $$("[data-gs]").forEach((c) => c.addEventListener("change", async () => {
+      try { await api("/api/admin/general", { method: "PUT", body: { [c.dataset.gs]: c.checked } }); toast("Saved", "ok"); } catch (err) { toast(err.message, "bad"); c.checked = !c.checked; }
+    }));
+  },
+  async act_updcheck(ds, btn) {
+    busy(btn, true);
+    const before = (await api("/api/system")).update?.checked_at || 0;
+    await api("/api/system/update/check", { body: {} });
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const d = await api("/api/system");
+      if ((d.update?.checked_at || 0) > before) { busy(btn, false); return this.about(); }
+      if (i === 10 && d.pending) toast("The helper service isn't picking up requests. On the server: sudo systemctl enable --now gwconsole-helper.path", "bad");
+    }
+    busy(btn, false);
+    this.about();
+  },
+  async act_updinstall(ds) {
+    const d = await api("/api/system");
+    const a = (d.update?.available || []).find((x) => x.version === ds.v);
+    if (!(await confirmBox(`Update to ${ds.v}?`, `<div class="md" style="max-height:45vh;overflow:auto">${mdLite((a?.notes || "").replace(/^## .*\n?/, ""))}</div>
+      <p class="small">The dashboard backs up first, installs, restarts (about a minute; this page reconnects) and checks the new version answers. If it doesn't, it goes back to v${esc(d.version)} automatically.</p>`, `Update to ${ds.v}`))) return;
+    await api("/api/system/update/install", { body: { version: ds.v } });
+    this.watchUpdate(ds.v);
+  },
+  act_updwatch() { this.watchUpdate(""); },
+  async watchUpdate(target) {
+    const body = document.createElement("div");
+    body.innerHTML = `<div class="row" data-st>${pill("info", "starting")}</div><pre class="out" data-log style="max-height:50vh;min-height:200px">waiting for the helper…</pre>`;
+    let stop = false;
+    modal({ title: target ? `Updating to ${target}` : "Update log", body, size: "lg", actions: [{ label: "Close", value: true }] }).then(() => { stop = true; });
+    let waited = 0, seenRunning = false;
+    while (!stop) {
+      await new Promise((r) => setTimeout(r, 2000));
+      waited += 2;
+      let s;
+      try { s = await api("/api/system/update/status"); } catch { $("[data-st]", body).innerHTML = pill("warn", "restarting… reconnecting"); continue; }
+      $("[data-log]", body).textContent = s.log || "…";
+      $("[data-log]", body).scrollTop = 1e9;
+      if (s.state === "running") { seenRunning = true; $("[data-st]", body).innerHTML = pill("info", s.message || "installing…"); }
+      if (!seenRunning && s.pending && waited > 20) $("[data-st]", body).innerHTML = pill("crit", "the helper service isn't running — sudo systemctl enable --now gwconsole-helper.path");
+      if ((seenRunning || !target) && ["done", "rolled_back", "failed"].includes(s.state)) {
+        const ok = s.state === "done";
+        $("[data-st]", body).innerHTML = pill(ok ? "ok" : "crit", s.message || s.state) + (ok ? ` <button class="btn sm pri" onclick="location.reload()">Reload the page</button>` : "");
+        if (ok && target) setTimeout(() => location.reload(), 4000);
+        break;
+      }
+    }
+  },
+  async act_cfdupdate(ds, btn) {
+    if (!(await confirmBox(`Update cloudflared on ${ds.name}?`, `<p>Installs the newest cloudflared, then restarts this node's tunnels <b>one at a time</b>, waiting for each to come back.
+      If one doesn't, cloudflared goes back to the current version and the tunnels are restarted again.</p><p class="small muted">Each tunnel drops its connections for a few seconds while it restarts.</p>`, "Update"))) return;
+    busy(btn, true);
+    try { const r = await api(`/api/cloudflared/${encodeURIComponent(ds.name)}/update`, { body: {} }); await showOutput(r.ok ? "cloudflared updated" : "cloudflared not updated", r); }
+    finally { busy(btn, false); this.about(); }
+  },
+  async act_histshow(ds) {
+    const r = await api(`/api/admin/config-history/${encodeURIComponent(ds.id)}`);
+    modal({ title: "Config change", size: "lg", body: renderDiff(r.text), actions: [{ label: "Close", value: true }] });
+  },
+
+  // ============================================================ BACKUPS
+  async backups() {
+    const d = await api("/api/admin/backups");
+    if (S.page !== "settings" || this.tab !== "backups") return;
+    const st = d.settings, last = d.last;
+    $("#setBody").innerHTML = `
+      <div class="panel"><div class="hd"><h2>Backups of this dashboard</h2><span class="meta">Settings, keys, users, nodes, accounts, alerts — in /var/backups/gwconsole</span>
+        <div class="acts"><button class="btn sm pri" data-a="bknow">Back up now</button></div></div>
+        ${last ? `<div class="bd small">${last.ok ? yes(true) : yes(false)} Last backup ${esc(fmt.ago(last.at))}${last.by && last.by !== "schedule" ? ` (by ${esc(last.by)})` : " (nightly)"}${last.ok ? "" : `: <span class="mono">${esc(last.output)}</span>`}
+          ${last.ok && /copied to/.test(last.output) ? ` · ${esc(last.output.split("\n").find((l) => /copied to/.test(l)) || "")}` : ""}</div>` : ""}
+        <div class="bd flush tbl-wrap"><table><thead><tr><th>Backup</th><th>Kind</th><th>When</th><th class="num">Size</th><th></th></tr></thead><tbody>
+        ${d.items.map((b) => `<tr><td class="mono small">${esc(b.name)}</td><td>${{ backup: "nightly / manual", restore: "before a restore" }[b.kind] || "before an update"}</td>
+          <td class="small">${esc(fmt.short(b.at))}</td><td class="num">${fmt.bytes(b.size)}</td>
+          <td><button class="btn sm" data-a="bkdl" data-name="${esc(b.name)}">Download</button></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No backups yet.</td></tr>`}
+        </tbody></table></div></div>
+      <form class="panel" id="bkForm"><div class="hd"><h2>Nightly backup</h2></div><div class="bd form" style="max-width:680px">
+        <label class="check"><input type="checkbox" name="nightly_backup" ${st.nightly_backup ? "checked" : ""}> Back up every night (keeps the last 14)</label>
+        <div class="two"><label>Also copy it to node<select name="backup_copy_node"><option value="">— don't copy —</option>${d.nodes.map((n) => `<option ${n === st.backup_copy_node ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>
+          <label>Folder on that node<input name="backup_copy_dir" type="text" value="${esc(st.backup_copy_dir)}"></label></div>
+        <div class="hint">A copy on another machine means losing the dashboard host doesn't lose its backups. It uses the dashboard's SSH key; the newest 14 are kept there.</div>
+        <div class="row"><button class="btn pri" type="submit">Save</button></div></div></form>
+      <div class="panel"><div class="hd"><h2>Restoring</h2></div><div class="bd small help">
+        <p>On the dashboard host, as root: <code>gwconsole restore /var/backups/gwconsole/&lt;file&gt;.tar.gz</code> — it saves the current state first, restores, and restarts.</p>
+        <p>A downloaded <code>.gwcbak</code> file is encrypted with the passphrase you chose: copy it to the host and run the same command; it asks for the passphrase.
+          It contains <code>secret.key</code>, which unlocks the stored Cloudflare/Telegram/Discord tokens — keep it somewhere safe.</p></div></div>`;
+    $("#bkForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = Object.fromEntries(new FormData(e.target).entries());
+      fd.nightly_backup = $("[name=nightly_backup]", e.target).checked;
+      try { await api("/api/admin/general", { method: "PUT", body: fd }); toast("Saved", "ok"); this.backups(); } catch (err) { toast(err.message, "bad"); }
+    });
+  },
+  async act_bknow(ds, btn) {
+    busy(btn, true);
+    const before = (await api("/api/admin/backups")).last?.at || 0;
+    await api("/api/admin/backups/run", { body: {} });
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const d = await api("/api/admin/backups");
+      if ((d.last?.at || 0) > before) { busy(btn, false); toast(d.last.ok ? "Backup done" : "Backup failed", d.last.ok ? "ok" : "bad"); return this.backups(); }
+      if (i === 10 && d.pending) toast("The helper service isn't picking up requests. On the server: sudo systemctl enable --now gwconsole-helper.path", "bad");
+    }
+    busy(btn, false);
+  },
+  async act_bkdl(ds) {
+    await taskModal({ title: "Download backup", submit: "Download", html: `<p style="margin:0">The file is encrypted with a passphrase you choose now. You'll need it to restore.</p>
+        <label>Passphrase<input name="p1" type="password" autocomplete="new-password" required></label><label>Repeat<input name="p2" type="password" autocomplete="new-password" required></label>`,
+      run: async (fd) => {
+        if (fd.p1 !== fd.p2) throw new Error("the passphrases don't match");
+        if (fd.p1.length < 8) throw new Error("use at least 8 characters");
+        const r = await fetch("/api/admin/backups/download", { method: "POST", headers: { "Content-Type": "application/json", "X-GWC": "1" }, body: JSON.stringify({ name: ds.name, passphrase: fd.p1 }) });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+        const blob = await r.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob); a.download = ds.name.replace(".tar.gz", ".gwcbak"); a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        return { ok: true, output: `Saved ${a.download}. Restore it with: gwconsole restore <file>` };
+      } });
   },
 };
 
