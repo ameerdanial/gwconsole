@@ -80,6 +80,81 @@ MIGRATIONS = [
         created_at INTEGER NOT NULL
     );
     """,
+    # 1 -> 2 : v1.4.0 — "server" node type, monitoring, traffic, update history
+    """
+    CREATE TABLE nodes_v2 (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT NOT NULL UNIQUE,
+        kind       TEXT NOT NULL CHECK (kind IN ('haproxy','cloudflared','server')),
+        data       TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    INSERT INTO nodes_v2 (id, name, kind, data, created_at, updated_at)
+        SELECT id, name, kind, data, created_at, updated_at FROM nodes;
+    DROP TABLE nodes;
+    ALTER TABLE nodes_v2 RENAME TO nodes;
+    CREATE TABLE checks (
+        host       TEXT PRIMARY KEY,
+        kind       TEXT NOT NULL DEFAULT 'http',
+        source     TEXT NOT NULL DEFAULT 'auto',
+        internal   TEXT NOT NULL DEFAULT '',
+        route      TEXT NOT NULL DEFAULT '{}',
+        opts       TEXT NOT NULL DEFAULT '{}',
+        excluded   INTEGER NOT NULL DEFAULT 0,
+        state      TEXT NOT NULL DEFAULT '{}',
+        seen_at    INTEGER,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE health (
+        node TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        at   INTEGER NOT NULL
+    );
+    CREATE TABLE services (
+        node       TEXT NOT NULL,
+        unit       TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (node, unit)
+    );
+    CREATE TABLE samples (
+        series TEXT NOT NULL,
+        ts     INTEGER NOT NULL,
+        value  REAL NOT NULL,
+        PRIMARY KEY (series, ts)
+    ) WITHOUT ROWID;
+    CREATE TABLE samples_15m (
+        series TEXT NOT NULL,
+        ts     INTEGER NOT NULL,
+        value  REAL NOT NULL,
+        n      INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (series, ts)
+    ) WITHOUT ROWID;
+    CREATE TABLE traffic_daily (
+        day      TEXT NOT NULL,
+        source   TEXT NOT NULL,
+        name     TEXT NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        bytes    INTEGER NOT NULL DEFAULT 0,
+        visitors INTEGER NOT NULL DEFAULT 0,
+        cached   INTEGER NOT NULL DEFAULT 0,
+        threats  INTEGER NOT NULL DEFAULT 0,
+        s4xx     INTEGER NOT NULL DEFAULT 0,
+        s5xx     INTEGER NOT NULL DEFAULT 0,
+        extra    TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (day, source, name)
+    ) WITHOUT ROWID;
+    CREATE TABLE update_history (
+        id      INTEGER PRIMARY KEY,
+        at      INTEGER NOT NULL,
+        kind    TEXT NOT NULL,
+        from_v  TEXT,
+        to_v    TEXT,
+        by      TEXT,
+        result  TEXT NOT NULL,
+        seconds INTEGER
+    );
+    """,
 ]
 
 
