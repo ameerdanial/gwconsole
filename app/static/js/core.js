@@ -88,6 +88,22 @@ function modal({ title, body, actions = [], size = "", onOpen, locked = false })
     if (onOpen) onOpen(bg);
   });
 }
+/** A small ⋯ menu under `anchor`: items [{label, act, cls, op}] or "-" for a divider. Resolves the picked act. */
+function popMenu(anchor, items) {
+  $$(".menu").forEach((m) => m.remove());
+  return new Promise((resolve) => {
+    const m = document.createElement("div");
+    m.className = "menu";
+    m.innerHTML = items.map((i, k) => i === "-" ? "<hr>" : i.op && !can("operator") ? ""
+      : `<button type="button" data-k="${k}" class="${i.cls || ""}">${esc(i.label)}</button>`).join("");
+    const wrap = anchor.closest(".more") || anchor.parentElement;
+    wrap.appendChild(m);
+    const off = (e) => { if (!m.contains(e.target)) { done(null); } };
+    const done = (v) => { m.remove(); document.removeEventListener("mousedown", off, true); resolve(v); };
+    m.addEventListener("click", (e) => { const b = e.target.closest("[data-k]"); if (b) done(items[+b.dataset.k].act); });
+    setTimeout(() => document.addEventListener("mousedown", off, true), 0);
+  });
+}
 const confirmBox = (title, html, label = "Confirm", cls = "pri") =>
   modal({ title, body: html, size: "sm", actions: [{ label: "Cancel", value: false }, { label, cls, value: true }] });
 
