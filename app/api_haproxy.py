@@ -14,8 +14,9 @@ from fastapi import APIRouter, Body, Request
 from . import cloudflared, configops, haproxy, history, hpcfg, tunnelops
 from .cfapi import CFError
 from .collect import resolve_edge, tunnel_ref
+from .scope import HPView, routes
 from .sshpool import NodeError
-from .state import audit, need, shielded, st
+from .state import audit, need, scope, shielded, st
 
 router = APIRouter(prefix="/api/haproxy")
 
@@ -56,7 +57,7 @@ def _summary(m: dict) -> str:
 
 
 @router.get("/{node}/model")
-async def model(node: str):
+async def model(request: Request, node: str):
     n = st.s.haproxy(node)
     tg = haproxy.HAProxyConfig(st.pool, st.s, n)
     text = await tg.read()
@@ -67,7 +68,27 @@ async def model(node: str):
             m["used_by"] = [r for r in hpcfg.references(text, m["name"]) if r != f"backend {m['name']}"]
     d.update(hash=configops.sha(text), defaults_mode=defaults_mode(text), host=n.host,
              tunnels=await _tunnels() if st.s.cloudflared_nodes else [])
+    sc = scope(request)
+    if not sc.all:          # scoped access: only their host rules and backends; shared backends read-only
+        v = HPView(sc, node, d, routes(st.store.db))
+        d = v.filter_model(d)
+        d["tunnels"] = [t for t in d["tunnels"] if sc.tunnel_ok(t["node"], t["tunnel"])]
+        for b in d["backends"]:
+            b["used_by"] = [r for r in b.get("used_by") or [] if r.split()[-1] in v.frontends]
     return d
+
+
+def _scoped(request: Request, node: str, text: str, ops: list[dict], cf: dict | None) -> tuple[list[dict], HPView | None]:
+    """For a scoped user: rebuild the ops so only their own rules and backends change; checked again after."""
+    sc = scope(request)
+    if sc.all:
+        return ops, None
+    if cf:
+        sc.need_host(str(cf.get("hostname", "")))
+        sc.need_tunnel(str(cf.get("node", "")), str(cf.get("tunnel", "")))
+    cur = hpcfg.parse(text)
+    v = HPView(sc, node, cur, routes(st.store.db))
+    return v.rewrite_ops(cur, ops), v
 
 
 def _mode_of(text: str, kind: str, name: str, models: dict) -> str:
@@ -222,8 +243,11 @@ async def plan(request: Request, node: str, body: dict = Body(...)):
     tg = haproxy.HAProxyConfig(st.pool, st.s, n)
     text = await tg.read()
     ops = _resolve(body.get("ops"))
+    ops, view = _scoped(request, node, text, ops, body.get("cloudflare"))
     try:
         new = hpcfg.apply_ops(text, ops)
+        if view:
+            view.check_change(hpcfg.parse(text), hpcfg.parse(new))
     except hpcfg.CfgError as e:
         return {"error": str(e), "hash": configops.sha(text)}
     diff = configops.unified_diff(text, new, n.config_path)
@@ -266,7 +290,10 @@ async def apply(request: Request, node: str, body: dict = Body(...)):
         text = await tg.read()
         if body.get("base_hash") and configops.sha(text) != body["base_hash"]:
             return {"ok": False, "stage": "conflict", "output": "haproxy.cfg changed on the server meanwhile — review again."}
+        ops, view = _scoped(request, node, text, ops, body.get("cloudflare"))
         new = hpcfg.apply_ops(text, ops)
+        if view:
+            view.check_change(hpcfg.parse(text), hpcfg.parse(new))
         _, errors = _checks(text, new, ops)
         if errors:
             return {"ok": False, "stage": "checks", "output": "\n".join("✘ " + e for e in errors)}
