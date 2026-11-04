@@ -4,6 +4,69 @@ All notable changes to Gateway Console. Versions follow [Semantic Versioning](ht
 MAJOR for breaking config/install changes, MINOR for new features, PATCH for fixes.
 
 ## [Unreleased]
+### Added
+- **Choose what each user can manage** (Settings → Users → Access…):
+  - "Everything" (as before) or "Only what I pick": whole tunnels, domains such as `shop.example.com`
+    or `*.example.com`, and extra HAProxy backends that no hostname points to;
+  - a live preview shows exactly which hostnames, HAProxy rules and backends they get;
+  - things outside their access are hidden everywhere: Overview, HAProxy, CF Tunnels, Monitoring,
+    Traffic, Alerts and Activity. A banner at the top says what they can manage;
+  - in HAProxy they edit only their own host rules ("Edit my rules"). A backend that other sites
+    also use is shown as "🔒 shared · read only";
+  - restarting a tunnel, or reading its logs, needs that whole tunnel; reloading HAProxy, editing the
+    raw config and creating or deleting tunnels are for users who can manage everything;
+  - every refused action is written to Activity as "denied". Superadmins always manage everything.
+- **Two-step sign-in (2FA)** with any authenticator app (Google Authenticator, Microsoft
+  Authenticator, 1Password, Aegis…):
+  - turn it on in My account → Profile & password: scan the QR code, type a code, save the 10 recovery codes
+    (download or copy). Each recovery code works once;
+  - "Remember this browser for 30 days" on the code step;
+  - 5 wrong codes lock the code step for 5 minutes;
+  - turning it off needs your password and a code;
+  - Settings → Sign-in security → **Require two-step sign-in for**: nobody / superadmins / everyone.
+    Users who need it are asked to set it up right after signing in;
+  - superadmins can **Reset 2FA** for someone who lost their phone (Settings → Users), and on the
+    host `gwconsole reset-2fa <user>`.
+- **Restore from the dashboard** (Settings → Backups):
+  - **Restore…** on every backup in the list, or **drop a file** (`.gwcbak` with its passphrase, or
+    `.tar.gz`, up to 200 MB) from this or another Gateway Console;
+  - the dialog shows what the backup holds (version, date, users, nodes, Cloudflare accounts) and
+    what will be lost (users, nodes and activity added since);
+  - needs your password, your 2FA code (if on) and typing RESTORE;
+  - the current state is saved first; the restore runs as root through the update helper, which
+    checks the file again; if the dashboard doesn't come back within 60 s, the saved state is put
+    back automatically. Live steps show progress and you sign in again at the end;
+  - a backup made by a newer version than the one running is refused; one from another dashboard
+    shows a warning (its secret key differs: 2FA and saved tokens need that key).
+- Backups show **Made by** (the version) and **Check**: every backup is opened and its database
+  checked. An alert fires when the newest backup is damaged.
+- Settings → Users shows **Can manage** and **2FA** columns.
+
+### Changed
+- **Monitoring:** graphs first, then Servers, then Sites. One big graph with tabs (Response time,
+  CPU, Memory, Disk, Traffic…), the range buttons inside the graph box, and a Now / Average / Peak
+  table under it: up to 4 lines, busiest first, click a row to show or hide its line. The last tab
+  you used is remembered.
+- **My account** is split into three tabs: Profile & password, Preferences, Signed-in browsers.
+- **Settings → Signed-in sessions** are grouped by user, newest 10 shown with "Show more".
+- Graph times and dates on every page follow your time and date preferences.
+- **Open tabs notice an update:** an idle tab reloads itself, otherwise a "Reload" banner appears.
+  The sign-in page reloads itself too.
+- The footer only says "up to date" when the last check worked and is recent; otherwise it says
+  "check failed", "not checked yet" or when it last checked.
+- Activity: "Hide sign-ins" still shows failed sign-ins and password changes.
+- Summary tile text wraps to 2 lines everywhere.
+- `gwconsole upgrade` refuses to go back to a version older than 1.5.0 while users with limited
+  access exist (they would get everything); `--force` skips the check.
+
+### Fixed
+- CF Tunnels: **+ New tunnel** did nothing (the tab bar caught the click).
+- Traffic: sections had no space between them; the caption reads "Today · <date>".
+- Signed-in browsers listed sessions that had already been signed out for being idle.
+- Activity showed "-" instead of the user for idle sign-outs.
+- Wording: "1 core" instead of "1 cores"; the "new" tag now marks Sign-in security.
+- The browser console no longer shows a 401 on the sign-in page.
+- Two-column form fields could overflow their box on narrow screens.
 
 ## [1.4.1] - 2026-11-04
 ### Added
