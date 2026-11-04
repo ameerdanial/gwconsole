@@ -260,7 +260,10 @@ def _busiest_hour(name: str, days: int, cfg: dict) -> int | None:
     return max(range(24), key=lambda h: hours[h]) if any(hours) else None
 
 
-async def report(rng: str) -> dict:
+async def report(rng: str, allow_host=None, allow_hp=None) -> dict:
+    """The Traffic page. `allow_host(hostname)` / `allow_hp("node/fe:name")` cut it down for a scoped user:
+    then only their hostnames and HAProxy frontends/backends are counted."""
+    scoped = allow_host is not None
     if rng not in RANGE_DAYS:
         rng = "7d"
     cfg = st.store.monitor_cfg()
@@ -270,7 +273,14 @@ async def report(rng: str) -> dict:
 
     def rows(source, ds):
         q = ",".join("?" * len(ds))
-        return db.q(f"SELECT * FROM traffic_daily WHERE source=? AND day IN ({q})", (source, *ds))
+        out = db.q(f"SELECT * FROM traffic_daily WHERE source=? AND day IN ({q})", (source, *ds))
+        if scoped and source == "cf":
+            out = [r for r in out if allow_host(r["name"])]
+        elif scoped and source == "hp":
+            out = [r for r in out if allow_hp(r["name"])]
+        elif scoped:
+            out = []                         # zone totals include other people's sites
+        return out
 
     # Cloudflare -------------------------------------------------------
     hosts, labels = _group(rows("cf", days), days, rng)
@@ -285,9 +295,10 @@ async def report(rng: str) -> dict:
     cf = {
         "kpi": {k: {"value": base[k], "delta": _delta(base[k], basep[k])} for k in ("requests", "bytes", "threats")},
         "hosts": hosts, "chart": _stack(hosts, labels),
-        "status": st.store.get("traffic_status", {}) or {}, "accounts": len(st.s.cf_accounts),
+        "status": ({} if scoped else st.store.get("traffic_status", {})) or {}, "accounts": len(st.s.cf_accounts),
     }
-    cf["kpi"]["visitors"] = {"value": zone_now["visitors"], "delta": _delta(zone_now["visitors"], zone_prev["visitors"])}
+    vis_now, vis_prev = (zone_now, zone_prev) if zone_now["requests"] else (host_now, host_prev)
+    cf["kpi"]["visitors"] = {"value": vis_now["visitors"], "delta": _delta(vis_now["visitors"], vis_prev["visitors"])}
     cr = lambda d: round(d["cached"] * 100 / d["requests"], 1) if d["requests"] else None
     cf["kpi"]["cached"] = {"value": cr(base), "delta": (round(cr(base) - cr(basep), 1)
                                                         if cr(base) is not None and cr(basep) is not None else None)}
@@ -312,8 +323,8 @@ async def report(rng: str) -> dict:
     fe_now = _sum([r for r in hp_rows if "/fe:" in r["name"]])
     fe_prev = _sum([r for r in rows("hp", prev_days) if "/fe:" in r["name"]])
     be_now = _sum([r for r in hp_rows if "/be:" in r["name"]])
-    peak = db.one("SELECT MAX(value) AS v FROM samples WHERE series LIKE 'hp.conn:%' AND ts >= ?",
-                  (int(time.time()) - min(n, 2) * 86400,))
+    peak = None if scoped else db.one("SELECT MAX(value) AS v FROM samples WHERE series LIKE 'hp.conn:%' AND ts >= ?",
+                                      (int(time.time()) - min(n, 2) * 86400,))
     hp = {
         "kpi": {"requests": {"value": fe_now["requests"], "delta": _delta(fe_now["requests"], fe_prev["requests"])},
                 "bytes": {"value": fe_now["bytes"], "delta": _delta(fe_now["bytes"], fe_prev["bytes"])},
