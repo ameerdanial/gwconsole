@@ -8,6 +8,7 @@ import dataclasses
 import logging
 import re
 import shlex
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from .alerts import Engine
 from .api_admin import router as admin_router
 from .api_alerts import active_alerts, router as alerts_router
 from .api_haproxy import router as haproxy_router
+from .api_account import router as account_router
 from .api_monitor import enrich_tunnels, router as monitor_router
 from .api_system import record_running_version, router as system_router, whatsnew_pending
 from .audit import Audit
@@ -83,6 +85,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Gateway Console", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None,
               openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+app.include_router(account_router)
 app.include_router(monitor_router)
 app.include_router(alerts_router)
 app.include_router(admin_router)
@@ -97,9 +100,13 @@ async def guard(request: Request, call_next):
     if p.startswith("/api/") and p not in OPEN_PATHS:
         if st.store and not ip_allowed(ip(request), st.store.general().get("allowed_networks", "")):
             return JSONResponse({"error": "not allowed from this network"}, status_code=403)
-        u = st.store.session(request.cookies.get(COOKIE))
+        idle = request.headers.get("x-gwc-idle")
+        u = st.store.session(request.cookies.get(COOKIE), int(idle) if idle and idle.isdigit() else None)
         if not u:
-            return JSONResponse({"error": "not logged in"}, status_code=401)
+            why = st.store.expired_reason
+            if why:
+                st.audit.log("?", "signed out (idle)", "-", True, why, ip(request))
+            return JSONResponse({"error": why or "not logged in", "idle": bool(why)}, status_code=401)
         if request.method != "GET" and request.headers.get("x-gwc") != "1":
             return JSONResponse({"error": "missing X-GWC header"}, status_code=403)
         if u["must_change"] and p not in MUST_CHANGE_OK:
@@ -180,7 +187,8 @@ async def me(request: Request):
     u = user(request)
     from .api_admin import setup_pending
     return {"user": u["username"], "role": u["role"], "must_change": u["must_change"], "version": __version__,
-            "setup": u["role"] == "superadmin" and setup_pending(), "updated": whatsnew_pending(u["username"])}
+            "setup": u["role"] == "superadmin" and setup_pending(), "updated": whatsnew_pending(u["username"]),
+            "prefs": u.get("prefs") or {}, "idle_limit": u.get("idle_limit", 0)}
 
 
 @app.get("/api/inventory")
@@ -209,7 +217,8 @@ async def overview():
         alerts = active_alerts()
     else:  # engine hasn't finished its first round yet: show live evaluation
         alerts = [dict(a, id=None, acked_by=None, muted=False) for a in build_alerts(hp, tun, bool(st.s.cf_accounts))[0]]
-    return {"kpi": kpis(hp, tun), "alerts": alerts, "haproxy": hp, "tunnels": tun}
+    from .api_monitor import overview_extra
+    return {"kpi": kpis(hp, tun), "alerts": alerts, "haproxy": hp, "tunnels": tun, **(await overview_extra())}
 
 
 # ---- HAProxy ----------------------------------------------------------------
@@ -678,8 +687,31 @@ async def cfg_backup(kind: str, ref: str, name: str):
 
 # ---- activity -------------------------------------------------------------------
 @app.get("/api/audit")
-async def audit_list(n: int = 200):
-    return {"items": st.audit.tail(max(1, min(n, 2000)))}
+async def audit_list(n: int = 0, q: str = "", user: str = "", result: str = "", cat: str = "", since: int = 0,
+                     hide_logins: bool = False, offset: int = 0, limit: int = 50):
+    """Activity: newest first, filtered by search text, user, result (ok/failed), category and time."""
+    if n:                                   # v1.4.0 clients
+        return {"items": st.audit.tail(max(1, min(n, 2000)))}
+    return await asyncio.to_thread(st.audit.search, q=q, user=user, result=result, cat=cat, since=since,
+                                   hide_logins=hide_logins, offset=max(0, offset), limit=max(1, min(limit, 500)))
+
+
+@app.get("/api/audit.csv")
+async def audit_csv(q: str = "", user: str = "", result: str = "", cat: str = "", since: int = 0, hide_logins: bool = False):
+    import csv
+    import io
+    from fastapi.responses import Response
+    r = await asyncio.to_thread(st.audit.search, q=q, user=user, result=result, cat=cat, since=since,
+                                hide_logins=hide_logins, offset=0, limit=100000)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time_utc", "user", "category", "action", "target", "result", "from", "detail"])
+    for i in r["items"]:
+        w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(i.get("ts", 0))), i.get("user"), i.get("cat"),
+                    i.get("action"), i.get("target"), "ok" if i.get("ok") else "failed", i.get("ip"),
+                    (i.get("detail") or "")[:2000]])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="activity-{time.strftime("%Y%m%d")}.csv"'})
 
 
 @app.exception_handler(HTTPException)
