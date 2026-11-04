@@ -5,7 +5,8 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 
 | File | What it does |
 |---|---|
-| `main.py` | App startup, login, role guard, and the gateway APIs (overview, HAProxy incl. drain/maint kept after restart, tunnels with routes, config editor, activity) |
+| `main.py` | App startup, login, role and idle sign-out guard, and the gateway APIs (overview, HAProxy incl. drain/maint kept after restart, tunnels with routes, config editor, activity search and CSV) |
+| `api_account.py` | My account APIs for every role: profile, preferences, your own signed-in browsers |
 | `api_monitor.py` | Monitoring and Traffic APIs: sites, servers, watched services and Restart, graphs, Settings → Monitoring, weekly summary, Traffic page and CSV, per-hostname routes for CF Tunnels |
 | `api_alerts.py` | Alerts API: active/history, acknowledge, mutes, CSV export, check now |
 | `api_haproxy.py` | HAProxy Add / Edit APIs: form model of every frontend and backend, dry-run plan (summary, checks, diff, `haproxy -c`), apply with optional Cloudflare publish and undo, reachability / free-port probes |
@@ -18,12 +19,12 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 | `sites.py` | Public hostnames and where they go: discovery from tunnel ingress and HAProxy host rules, route tunnel → HAProxy frontend → backend → servers |
 | `traffic.py` | Traffic numbers per day for a year: Cloudflare GraphQL Analytics per hostname and zone, HAProxy per frontend/backend; builds the Traffic page and CSV |
 | `notify.py` | Telegram and Discord message formatting and sending |
-| `db.py` | SQLite database with versioned schema migrations (v1.4 adds the Server node type, checks, health, services, samples, traffic and update history) |
-| `store.py` | Data access: users, sessions, settings (general and monitoring), Cloudflare accounts, nodes; one-time import from config.yaml |
+| `db.py` | SQLite database with versioned schema migrations (v1.4 adds the Server node type, checks, health, services, samples, traffic and update history; v1.4.1 user preferences and idle sign-out) |
+| `store.py` | Data access: users and their preferences, sessions with sign-out when away, settings (general and monitoring), Cloudflare accounts, nodes; one-time import from config.yaml |
 | `vault.py` | Encrypts secrets in the database with `/etc/gwconsole/secret.key` |
 | `config.py` | Loads the bootstrap `config.yaml` and defines the node (HAProxy, cloudflared, Server), tunnel and account data classes |
 | `auth.py` | scrypt password hashing and the login brute-force guard |
-| `audit.py` | Append-only audit log (`audit.log`) |
+| `audit.py` | Append-only audit log (`audit.log`) and searching it for the Activity page (text, user, result, category, time; paged) |
 | `sshpool.py` | Persistent SSH connections to nodes, host-key pinning and scanning |
 | `history.py` | Config history (local git mirror of every managed config file) and "changed outside the dashboard" detection |
 | `backup.py` | Dashboard backups: consistent snapshot, passphrase encryption, safe restore, copy to a node |
@@ -37,12 +38,12 @@ is plain HTML/CSS/JS served as-is — no build step, no CDN.
 | `tunnelops.py` | Tunnel lifecycle on nodes: create, archive-delete, comment-preserving ingress edits |
 | `cfapi.py` | Cloudflare API client: tunnels, DNS routes, create/delete, GraphQL analytics, token permission test |
 | `__main__.py` | Command line: serve, check, create-admin, reset-password (`--password-stdin` for install.sh), users, version |
-| `static/index.html` | Page shell: login form, sidebar, header |
+| `static/index.html` | Page shell: login form, sidebar with the user card and menu, header, footer |
 | `static/style.css` | All styling (dark theme, tables, forms, side panel, charts, settings sections) |
-| `static/js/core.js` | Helpers, API client, modals, ⋯ menus, roles, login and password flow, router |
+| `static/js/core.js` | Helpers, API client, date/time formatting from your preferences, modals, ⋯ menus, roles, login and password flow, sign-out when away, user menu, footer, router |
 | `static/js/charts.js` | Line charts with hover tooltips, stacked bar charts and sparklines as inline SVG (no libraries) |
 | `static/js/editor.js` | Config editor side panel with History tab |
-| `static/js/overview.js` · `monitoring.js` · `traffic.js` · `tunnels.js` (CF Tunnels) · `haproxy.js` · `alerts.js` · `activity.js` · `settings.js` | One file per page |
+| `static/js/overview.js` · `monitoring.js` · `traffic.js` · `tunnels.js` (CF Tunnels) · `haproxy.js` · `alerts.js` · `activity.js` · `account.js` (My account) · `settings.js` | One file per page |
 | `static/js/hpform.js` | HAProxy "+ Add" / Edit side panel: Frontend, Backend and Cloudflare parts, tabs, live plan, checks and diff |
 | `static/js/setup.js` | First-run setup wizard: Nodes → Cloudflare → Alerts → Done (reuses the Settings forms) |
 | `static/js/app.js` | Entry point: starts the app |
