@@ -8,10 +8,16 @@ const PAGE_LABEL = { overview: "Overview", monitoring: "Monitoring", traffic: "T
 
 PAGES.account = {
   every: 0,
+  tabs: [["", "Profile & password", "Your details, password and two-step sign-in"], ["prefs", "Preferences", "Time, dates, start page, auto-refresh and signing out when away"],
+    ["sessions", "Signed-in browsers", "Where you are signed in right now"]],
   mount(v, params) {
-    this.focus = params[0] || "";
+    this.tab = this.tabs.some((t) => t[0] === (params[0] || "")) ? params[0] || "" : "";
+    const cur = this.tabs.find((t) => t[0] === this.tab);
     setHeader("My account", "Your profile, password and preferences");
-    v.innerHTML = `<div id="acBody" class="scol"><div class="panel"><div class="empty">Loading…</div></div></div>`;
+    v.innerHTML = `<div class="setgrid"><nav class="snav"><div class="g">My account</div>${this.tabs.map(([k, l]) =>
+        `<a href="#/account${k ? "/" + k : ""}" class="${k === this.tab ? "on" : ""}" data-at="${k}">${esc(l)}${k === "sessions" ? `<span class="c" id="acSessN"></span>` : ""}</a>`).join("")}</nav>
+      <div class="scol"><div class="sph"><h2>${esc(cur[1])}</h2><span class="sub">${esc(cur[2])}</span></div>
+      <div id="acBody" class="scol"><div class="panel"><div class="empty">Loading…</div></div></div></div></div>`;
     v.addEventListener("click", (e) => this.onClick(e));
   },
   async load() {
@@ -26,14 +32,12 @@ PAGES.account = {
     let zones = [];
     try { zones = Intl.supportedValuesOf("timeZone"); } catch { zones = ["Asia/Kuala_Lumpur", "Asia/Singapore", "UTC"]; }
     const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    $("#acBody").innerHTML = `
-      <div class="panel"><div class="prof"><span class="av lg">${esc(initials(a.user))}</span>
+    if ($("#acSessN")) $("#acSessN").textContent = s.items.length;
+    const profile = `<div class="panel"><div class="prof"><span class="av lg">${esc(initials(a.user))}</span>
         <div><h3>${esc(a.user)} <span class="rolepill ${esc(a.role)}">${esc(a.role)}</span></h3>
           <div class="sub">${a.ip ? `Signed in from <span class="mono">${esc(a.ip)}</span> · ` : ""}last sign-in ${esc(fmt.ago(a.last_login))}${a.created_at ? ` · member since ${esc(fmt.date(a.created_at))}` : ""}</div>
-          <div class="sub">${esc(ROLE_INFO[a.role] || "")}</div></div></div></div>
-      <div class="acgrid">
-        <div class="scol">
-          <form class="panel" id="acPw" autocomplete="on"><div class="hd"><h2>Password</h2><span class="meta">${a.pw_changed_at ? `changed ${esc(fmt.ago(a.pw_changed_at))}` : ""}</span></div>
+          <div class="sub">${esc(ROLE_INFO[a.role] || "")}</div></div></div></div>`;
+    const password = `<form class="panel" id="acPw" autocomplete="on"><div class="hd"><h2>Password</h2><span class="meta">${a.pw_changed_at ? `changed ${esc(fmt.ago(a.pw_changed_at))}` : ""}</span></div>
             <div class="bd form">
               <input type="text" name="username" value="${esc(a.user)}" autocomplete="username" hidden>
               <label>Current password<input name="current" type="password" autocomplete="current-password"></label>
@@ -41,10 +45,8 @@ PAGES.account = {
                 <label>Repeat new password<input name="repeat" type="password" autocomplete="new-password"></label></div>
               <div class="meter"><i data-meter></i></div><div class="hint" data-mhint>At least 10 characters, with upper and lower case letters and a digit.</div>
               <label class="check"><input type="checkbox" name="others" checked> Sign out my other browsers</label>
-              <div class="row"><button class="btn pri" type="submit">Change password</button><span class="ferr" data-err></span></div></div></form>
-          <div class="soon"><span class="tag3">v1.5</span><div><b>Two-step sign-in</b> (authenticator app) and <b>linking your Telegram</b> will appear here.</div></div>
-        </div>
-        <form class="panel" id="acPrefs"><div class="hd"><h2>Preferences</h2><span class="meta">saved for your user, on every browser</span></div>
+              <div class="row"><button class="btn pri" type="submit">Change password</button><span class="ferr" data-err></span></div></div></form>`;
+    const prefs = `<form class="panel" id="acPrefs" style="max-width:760px"><div class="hd"><h2>Preferences</h2><span class="meta">saved for your user, on every browser</span></div>
           <div class="bd form">
             <div class="fl">Time format${seg("time24", [[true, `24-hour · 14:05`], [false, `12-hour · 2:05 PM`]], p.time24)}</div>
             <div class="fl">Dates${seg("date_style", [["text", "4 Nov 2026"], ["dmy", "04/11/2026"], ["iso", "2026-11-04"]], p.date_style)}</div>
@@ -55,21 +57,26 @@ PAGES.account = {
               <div class="fl">Refresh pages automatically${seg("auto_refresh", [[true, "On"], [false, "Off"]], p.auto_refresh)}</div></div>
             <div class="fl">Sign me out when I'm away for${seg("idle_minutes", idleOpts, cap && (!p.idle_minutes || p.idle_minutes > cap) ? cap : p.idle_minutes)}
               <div class="hint">You get a one-minute warning with “Stay signed in”. Pages refreshing by themselves don't count as being there.${cap ? ` Your superadmin allows up to ${IDLE_LABEL[cap] || cap + " min"}.` : ""} A sign-in never lasts longer than ${a.policy.session_hours} h.</div></div>
-            <div class="row"><button class="btn pri" type="submit">Save preferences</button><span class="sub" data-sample></span></div></div></form>
-      </div>
-      <div class="panel" id="acSess"><div class="hd"><h2>Signed-in browsers</h2><span class="meta">yours only · signing one out takes effect right away</span>
+            <div class="row"><button class="btn pri" type="submit">Save preferences</button><span class="sub" data-sample></span></div></div></form>`;
+    const sessions = `<div class="panel" id="acSess"><div class="hd"><h2>Signed-in browsers</h2><span class="meta">yours only · signing one out takes effect right away</span>
         ${s.items.length > 1 ? `<div class="acts"><button class="btn sm danger" data-act="others">Sign out all others</button></div>` : ""}</div>
         <div class="bd flush tbl-wrap"><table><thead><tr><th>Browser</th><th>From</th><th>Signed in</th><th>Last active</th><th></th></tr></thead><tbody>
-        ${s.items.map((x) => `<tr><td>${esc(uaShort(x.user_agent))}</td><td class="mono small">${esc(x.ip || "–")}</td><td class="small">${esc(fmt.short(x.created_at))}</td>
-          <td class="small">${x.this ? "now" : esc(fmt.ago(x.last_active || x.last_seen))}</td>
+        ${s.items.map((x) => `<tr><td>${esc(uaShort(x.user_agent))}</td><td class="mono small">${esc(x.ip || "–")}</td><td class="small nowrap">${esc(fmt.short(x.created_at))}</td>
+          <td class="small nowrap">${x.this ? "now" : esc(fmt.ago(x.last_active || x.last_seen))}</td>
           <td>${x.this ? `<span class="tag">this browser</span>` : `<button class="btn xs" data-act="end" data-sid="${esc(x.sid)}">Sign out</button>`}</td></tr>`).join("")}
         </tbody></table></div></div>`;
-    $("[data-sample]").textContent = `Example: ${fmt.time(sample)}`;
+    $("#acBody").innerHTML = this.tab === "prefs" ? prefs : this.tab === "sessions" ? sessions
+      : `${profile}<div class="acgrid">${password}<div class="scol" id="ac2fa">${this.twofaPanel ? this.twofaPanel(a) : ""}</div></div>`;
+    if ($("[data-sample]")) $("[data-sample]").textContent = `Example: ${fmt.time(sample)}`;
     this.wire();
-    if (this.focus) { const el = this.focus === "prefs" ? $("#acPrefs") : this.focus === "sessions" ? $("#acSess") : null; el?.scrollIntoView({ block: "start" }); this.focus = ""; }
   },
   wire() {
     const pw = $("#acPw");
+    if (pw) this.wirePw(pw);
+    const pf = $("#acPrefs");
+    if (pf) this.wirePrefs(pf);
+  },
+  wirePw(pw) {
     pw.new.addEventListener("input", () => {
       const v = pw.new.value;
       const score = (v.length >= 10) + /[a-z]/.test(v) + /[A-Z]/.test(v) + /\d/.test(v) + (v.length >= 14 || /[^A-Za-z0-9]/.test(v));
@@ -90,7 +97,8 @@ PAGES.account = {
         this.load();
       } catch (ex) { err.textContent = ex.message; }
     });
-    const pf = $("#acPrefs");
+  },
+  wirePrefs(pf) {
     pf.addEventListener("click", (e) => {
       const b = e.target.closest("[data-seg] button");
       if (!b) return;
@@ -116,9 +124,54 @@ PAGES.account = {
       } catch (ex) { toast(ex.message, "bad"); }
     });
   },
+  twofaPanel(a) {
+    const t = a.twofa || {};
+    if (!t.on) {
+      return `<div class="panel"><div class="hd"><h2>Two-step sign-in</h2>${pill(t.required ? "warn" : "mute", t.required ? "required · off" : "off")}</div>
+        <div class="bd"><p class="small" style="margin:0 0 10px">After your password, the dashboard also asks for a 6-digit code from an authenticator app on your phone, so a stolen password alone isn't enough.</p>
+        <button class="btn pri" data-act="2fa-on">Turn on…</button></div></div>`;
+    }
+    const low = t.recovery_left <= 3;
+    return `<div class="panel"><div class="hd"><h2>Two-step sign-in</h2>${pill("ok", "on")}<span class="meta">since ${esc(fmt.date(t.set_at))}</span></div>
+      <div class="bd scol" style="gap:10px">
+        <div class="small"><span style="${low ? "color:var(--warn);font-weight:600" : ""}">${fmt.plural(t.recovery_left, "recovery code")} left</span>${low ? " — make new ones soon" : ""}
+          · ${fmt.plural(t.trusted_browsers, "remembered browser")}</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn sm" data-act="2fa-rc">New recovery codes…</button>
+          ${t.trusted_browsers ? `<button class="btn sm" data-act="2fa-forget">Forget remembered browsers</button>` : ""}
+          ${t.required ? `<span class="sub">Required for your role, so it can't be turned off here.</span>` : `<button class="btn sm danger" data-act="2fa-off">Turn off…</button>`}</div></div></div>`;
+  },
+  reauth(title, submit, cls, run) {
+    return taskModal({ title, submit, cls, size: "sm", html: `<p class="small" style="margin:0">Confirm it's you: your password and the current code from your app (or a recovery code).</p>
+      <label>Password<input name="password" type="password" autocomplete="current-password"></label>
+      <label>Code from your app<input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="14" placeholder="6 digits or a recovery code"></label>`,
+      run: (fd) => run({ password: fd.password, ...(/^\d{6}$/.test(fd.code.trim()) ? { code: fd.code.trim() } : { recovery: fd.code }) }) });
+  },
   async onClick(e) {
     const b = e.target.closest("[data-act]");
     if (!b) return;
+    if (b.dataset.act === "2fa-on") { if (await twofaSetup(false)) { toast("Two-step sign-in is on", "ok"); this.load(); } return; }
+    if (b.dataset.act === "2fa-forget") {
+      try { const r = await api("/api/account/2fa/browsers", { body: {} }); toast(`Forgot ${fmt.plural(r.forgotten, "browser")} — they ask for a code next time`, "ok"); this.load(); }
+      catch (err) { toast(err.message, "bad"); }
+      return;
+    }
+    if (b.dataset.act === "2fa-rc") {
+      let codes = null;
+      await this.reauth("New recovery codes", "Make new codes", "pri", async (body) => {
+        codes = (await api("/api/account/2fa/recovery", { body })).recovery_codes;
+        return { ok: true, output: "New codes made — the old ones no longer work." };
+      });
+      if (codes) await showRecoveryCodes(codes, false);
+      return this.load();
+    }
+    if (b.dataset.act === "2fa-off") {
+      const changed = await this.reauth("Turn off two-step sign-in", "Turn off", "danger", async (body) => {
+        await api("/api/account/2fa/off", { body });
+        return { ok: true, output: "Two-step sign-in is off. Your remembered browsers were forgotten." };
+      });
+      if (changed) this.load();
+      return;
+    }
     if (b.dataset.act === "end") {
       try { await api(`/api/account/sessions/${encodeURIComponent(b.dataset.sid)}`, { method: "DELETE" }); toast("That browser is signed out", "ok"); this.load(); }
       catch (err) { toast(err.message, "bad"); }
