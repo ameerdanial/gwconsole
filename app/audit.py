@@ -3,10 +3,10 @@ Activity page (filters by text, user, result, category and time; newest first, p
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections import deque
-import logging
 
 log = logging.getLogger("gwconsole.audit")
 
@@ -51,7 +51,7 @@ CATEGORIES = {
     "monitor": ("monitor site", "watch service", "unwatch service", "service restart", "weekly summary", "alert ack",
                 "mute", "unmute"),
     "settings": ("user ", "session revoke", "node ", "cf account", "settings change", "notify settings", "setup",
-                 "monitor settings", "access", "preferences"),
+                 "monitor settings", "access", "preferences", "denied", "2fa"),
     "updates": ("update ", "backup ", "restore", "cloudflared update"),
 }
 
@@ -83,7 +83,8 @@ def _lines_backwards(path: str, chunk: int = 65536):
 
 
 def search_file(path: str, q: str = "", user: str = "", result: str = "", cat: str = "", since: int = 0,
-            hide_logins: bool = False, offset: int = 0, limit: int = 50) -> dict:
+                hide_logins: bool = False, offset: int = 0, limit: int = 50, allow=None) -> dict:
+    """`allow(entry)` limits what a scoped user may see (their own entries and their own sites/tunnels)."""
     items, matched, hidden, users = [], 0, 0, set()
     q = q.strip().lower()
     if not os.path.exists(path):
@@ -95,9 +96,12 @@ def search_file(path: str, q: str = "", user: str = "", result: str = "", cat: s
             continue
         if since and r.get("ts", 0) < since:
             break                          # the file is in time order
+        if allow and not allow(r):
+            continue
         users.add(r.get("user", ""))
         c = category(r.get("action", ""))
-        if hide_logins and c == "signin" and cat != "signin":
+        # "Hide sign-ins" hides routine sign-ins and sign-outs; failed ones and password changes stay visible
+        if hide_logins and c == "signin" and cat != "signin" and r.get("ok", True) and not r.get("action", "").startswith("password"):
             hidden += 1
             continue
         if cat and c != cat:
