@@ -8,7 +8,7 @@ import yaml
 
 from . import configops
 from .config import CloudflaredNode, Settings, Tunnel
-from .sshpool import NodeError, SSHPool
+from .sshpool import SSHPool
 
 URL_RE = re.compile(r"^(https?|tcp|ssh|rdp)://[A-Za-z0-9.\-*_:/%?=&]+$")
 SPLIT = "@@GWC-T@@"
@@ -73,7 +73,7 @@ async def status(pool: SSHPool, n: CloudflaredNode, tunnels: list[Tunnel],
     r = await pool.run(n, "; ".join(parts))
     chunks = r.out.split(SPLIT)
     out = {"node": n.name, "host": n.host, "site": n.site, "version": chunks[0].strip(), "tunnels": []}
-    for t, chunk in zip(tunnels, chunks[1:]):
+    for t, chunk in zip(tunnels, chunks[1:], strict=False):
         svc_txt, _, rest = chunk.partition("@@CFG@@")
         cfg_txt, _, ready_txt = rest.partition("@@READY@@")
         if t.remote:
