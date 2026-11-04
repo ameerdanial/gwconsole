@@ -38,6 +38,7 @@ def test_upgrade_from_v13_keeps_nodes_and_allows_servers(tmp_path):
     assert s.db.one("SELECT node FROM services")["node"] == "web1"
     s.delete_node("web1")
     assert not s.db.q("SELECT * FROM services")
+    s.db.close()
 
 
 def test_monitor_settings_validation(store):
