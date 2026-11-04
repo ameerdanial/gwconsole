@@ -18,6 +18,16 @@
       <div class="err" id="loginErr"></div>
       <button class="btn pri" type="submit">Sign in</button>
     </form>
+    <form id="codeForm" class="hidden" autocomplete="off">
+      <div class="brand">GW<b>//</b>CONSOLE<small>Two-step sign-in</small></div>
+      <div class="small muted" id="codeWho"></div>
+      <input name="code" class="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="••••••" maxlength="6">
+      <input name="recovery" class="hidden" type="text" placeholder="Recovery code, e.g. ABCD-EFGH-JK" autocomplete="off" maxlength="14">
+      <label class="small rem"><input type="checkbox" name="remember"> Remember this browser for 30 days</label>
+      <div class="err" id="codeErr"></div>
+      <button class="btn pri" type="submit">Verify</button>
+      <div class="row small" style="justify-content:space-between"><a href="#" id="useRc">Use a recovery code</a><a href="#" id="codeBack" class="muted">Back</a></div>
+    </form>
     <p class="lfoot" id="loginFoot"></p>
   </div>
 
@@ -59,12 +69,14 @@
         <label class="sub row" title="Auto refresh"><input type="checkbox" id="auto" checked> auto</label>
         <button class="btn sm" id="refresh">Refresh</button>
       </header>
+      <div class="scopebar hidden" id="scopebar"></div>
       <section class="content" id="view"></section>
       <footer class="pfoot" id="pfoot"></footer>
     </main>
   </div>
 
   <div class="toasts" id="toasts"></div>
+  <script>window.GWC_VERSION = "__GWC_VERSION__";</script>
   <script src="/static/js/core.js"></script>
   <script src="/static/js/charts.js"></script>
   <script src="/static/js/editor.js"></script>
