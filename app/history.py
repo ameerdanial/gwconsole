@@ -104,8 +104,8 @@ def on_applied(store, db_path: str, node: str, path: str, content: str, stage: s
 
 async def check_drift(st) -> list[dict]:
     """Compare every managed config with its last known hash. Returns drift alerts."""
-    from .haproxy import HAProxyConfig
     from .cloudflared import TunnelConfig
+    from .haproxy import HAProxyConfig
     from .sshpool import NodeError
     targets = [(n.name, HAProxyConfig(st.pool, st.s, n)) for n in st.s.haproxy_nodes]
     for n in st.s.cloudflared_nodes:
