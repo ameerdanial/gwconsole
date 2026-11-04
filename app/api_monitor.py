@@ -299,7 +299,7 @@ async def enrich_tunnels(data: dict, hp_status: list[dict]) -> dict:
             tot = [0] * 7
             for rule in t["config"].get("ingress", []):
                 h = (rule.get("hostname") or "").lower()
-                rt = sites.route(models, h, rule.get("service", ""))
+                rt = sites.route(models, h, rule.get("service", ""), n.get("host", ""))
                 if rt["backend"]:
                     up = sites.servers_up(hp_status, rt["hp_node"], rt["backend"])
                     if up:
@@ -311,9 +311,54 @@ async def enrich_tunnels(data: dict, hp_status: list[dict]) -> dict:
                 daily = [req.get(h, {}).get(d, 0) for d in days]
                 rule["today"] = daily[-1]
                 rule["week"] = daily
-                tot = [a + b for a, b in zip(tot, daily)]
+                tot = [a + b for a, b in zip(tot, daily, strict=False)]
             t["requests_week"] = tot
             t["requests_today"] = tot[-1]
     data["traffic_days"] = days
     return data
 
+
+
+# ---- Overview ----------------------------------------------------------------------------
+async def overview_extra() -> dict:
+    """What the Overview page shows besides gateways and alerts: sites, servers, today's traffic."""
+    cfg = st.store.monitor_cfg()
+    rows = st.store.db.q("SELECT * FROM checks WHERE excluded=0 ORDER BY host")
+    order = {"down": 0, "failing": 1, "slow": 2, "up": 3}
+    sites_ = []
+    for r in rows:
+        stt = json.loads(r["state"] or "{}")
+        side = "pub" if stt.get("pub") else "int"
+        p = stt.get(side) or {}
+        pts = series([f"site.{side}.ms:{r['host']}"], "24h")[f"site.{side}.ms:{r['host']}"]
+        sites_.append({"host": r["host"], "kind": r["kind"], "status": stt.get("status"), "code": p.get("code"),
+                       "ms": p.get("ms"), "err": p.get("err"), "spark": [v for _, v in pts][-48:]})
+    sites_.sort(key=lambda x: (order.get(x["status"], 4), x["host"]))
+    servers = []
+    for s_ in _servers():
+        if not s_.get("at") and not s_.get("error"):
+            continue
+        servers.append({"name": s_["name"], "kind": s_["kind"], "error": s_.get("error"),
+                        "cpu": round(s_["load"][0] * 100 / max(1, s_.get("cores") or 1)) if s_.get("load") else None,
+                        "mem": s_.get("mem_pct"), "disk": (s_.get("fullest") or {}).get("pct"),
+                        "disk_mount": (s_.get("fullest") or {}).get("mount")})
+    day = monitor.local_day(time.time(), cfg)
+    yday = monitor.local_day(time.time() - 86400, cfg)
+
+    def total(d, src):
+        r = st.store.db.one("SELECT SUM(requests) AS n FROM traffic_daily WHERE day=? AND source=?" +
+                            (" AND name LIKE '%/fe:%'" if src == "hp" else ""), (d, src))
+        return int(r["n"] or 0) if r else 0
+    src = "cf" if total(day, "cf") or total(yday, "cf") else "hp"
+    hours: dict = {}
+    if src == "cf" and st.s.cf_accounts:
+        try:
+            hours = await traffic.collector.today_hours()
+        except Exception:
+            hours = {}
+    top = sorted(hours, key=lambda h: -sum(hours[h]))
+    chart = [{"name": h, "data": hours[h]} for h in top[:3]]
+    if len(top) > 3:
+        chart.append({"name": "other", "data": [sum(hours[h][i] for h in top[3:]) for i in range(24)]})
+    return {"sites": sites_, "servers": servers, "settings": {k: cfg[k] for k in ("disk_warn", "disk_crit", "mem_crit")},
+            "traffic": {"source": src, "today": total(day, src), "yesterday": total(yday, src), "hours": chart}}
