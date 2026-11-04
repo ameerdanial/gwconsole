@@ -194,3 +194,14 @@ def test_signin_security(client, monkeypatch):
     r = client.post("/api/login", json={"user": "root", "password": "RootPass1234"})
     assert r.status_code == 403 and "network" in r.json()["error"]
     st.store.put("general", {**st.store.general(), "allowed_networks": ""})
+
+
+def test_gwconsole_command_defines_every_variable_it_uses():
+    """The `gwconsole` command is written out of install.sh: every upper-case variable it uses must be set inside it
+    (1.5.0's downgrade check once used $VAR, which only install.sh itself had)."""
+    import re
+    text = Path(__file__).resolve().parent.parent.joinpath("install.sh").read_text()
+    cli = text.split("cat > /usr/local/bin/gwconsole <<'EOF'\n", 1)[1].split("\nEOF\n", 1)[0]
+    used = set(re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", cli))
+    assigned = set(re.findall(r"(?:^|[\s;(])([A-Z][A-Z0-9_]*)=", cli))
+    assert used - assigned - {"HOME", "PATH", "EUID", "PWD"} == set()
