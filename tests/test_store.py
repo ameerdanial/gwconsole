@@ -1,7 +1,7 @@
 """Tests for the database store: users, roles, sessions, settings, encrypted accounts, nodes, import."""
 import pytest
 
-from app.config import CloudflaredNode, HAProxyNode, Settings, Tunnel, CFAccount
+from app.config import CFAccount, CloudflaredNode, HAProxyNode, Settings, Tunnel
 
 
 def test_users_and_last_superadmin_guard(store):
