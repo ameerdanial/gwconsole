@@ -281,7 +281,7 @@ cat > /usr/local/bin/gwconsole <<'EOF'
 #!/usr/bin/env bash
 # gwconsole — helper for the Gateway Console dashboard (installed by install.sh)
 set -e
-ETC=/etc/gwconsole; APP=/opt/gwconsole
+ETC=/etc/gwconsole; APP=/opt/gwconsole; VAR=/var/lib/gwconsole
 # run the app's CLI as the service user, so the database keeps the right owner
 run() { cd $APP; set -a; [ -r $ETC/env ] && . $ETC/env; set +a
         GWC_CONFIG=$ETC/config.yaml exec runuser -u gwconsole -- $APP/venv/bin/python -m app "$@"; }
