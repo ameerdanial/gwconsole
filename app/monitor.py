@@ -121,6 +121,36 @@ async def tcp_check(hostport: str) -> dict:
         return {"ok": False, "code": None, "ms": None, "err": (str(e) or "timed out")[:160]}
 
 
+async def node_check(node, service: str, kind: str, host_header: str, path: str, opts: dict) -> dict:
+    """Internal check run on a node over SSH (for origins that are `localhost` on that node)."""
+    scheme, ip, port = sites.split_service(service)
+    if kind == "tcp":
+        cmd = (f"s=$(date +%s%N); timeout 5 bash -c '</dev/tcp/{shlex.quote(ip)}/{int(port or 0)}' 2>/dev/null "
+               "&& echo \"open $(( ($(date +%s%N) - s) / 1000000 ))\" || echo 'closed 0'")
+    else:
+        url = service.rstrip("/") + path
+        cmd = (f"curl -ksS -o /dev/null -m 8 -H {shlex.quote('Host: ' + host_header)} "
+               f"-w '%{{http_code}} %{{time_total}}' {shlex.quote(url)} 2>&1 | tail -1")
+    try:
+        r = await st.pool.run(node, cmd, root=False, timeout=20)
+    except (NodeError, OSError) as e:
+        return {"ok": False, "code": None, "ms": None, "err": str(e)[:160]}
+    parts = r.out.strip().split()
+    if kind == "tcp":
+        ok = bool(parts) and parts[0] == "open"
+        return {"ok": ok, "code": "open" if ok else None, "ms": max(1, int(parts[1])) if ok and len(parts) > 1 else None,
+                "err": "" if ok else "port closed (checked from " + node.name + ")"}
+    try:
+        code, secs = int(parts[0]), float(parts[1])
+    except (ValueError, IndexError):
+        return {"ok": False, "code": None, "ms": None, "err": (r.out.strip() or "no answer")[:160]}
+    if code == 0:
+        return {"ok": False, "code": None, "ms": None, "err": f"no answer (checked from {node.name})"}
+    exp = opts.get("expect")
+    ok = (code == int(exp)) if exp else code < 500
+    return {"ok": ok, "code": code, "ms": int(secs * 1000), "err": "" if ok else f"HTTP {code}"}
+
+
 async def public_cert(host: str) -> dict:
     ctx = ssl.create_default_context()
     try:
@@ -308,12 +338,18 @@ class Monitor:
         if kind == "http" and opts.get("public", True):
             jobs["pub"] = http_check(self.http, f"https://{host}{path}", None, opts)
         if row["internal"]:
-            if kind == "tcp":
+            rt = json.loads(row["route"] or "{}")
+            hdr = (rt.get("origin") or {}).get("httpHostHeader") or host
+            via = rt.get("via_node")
+            node = next((n for n in st.s.cloudflared_nodes if n.name == via), None) if via else None
+            if node:                            # localhost on the cloudflared machine: check from there
+                jobs["int"] = node_check(node, row["internal"], kind, hdr, path, opts)
+            elif kind == "tcp":
                 jobs["int"] = tcp_check(row["internal"])
             else:
                 base = row["internal"].rstrip("/")
-                jobs["int"] = http_check(self.http_insecure, base + path, host, opts)
-        res = dict(zip(jobs, await asyncio.gather(*jobs.values())))
+                jobs["int"] = http_check(self.http_insecure, base + path, hdr, opts)
+        res = dict(zip(jobs, await asyncio.gather(*jobs.values()), strict=False))
         t = int(time.time()) // 60 * 60
         samples = []
         for side in ("pub", "int"):
@@ -617,7 +653,7 @@ class Monitor:
                    "WHERE kind='site.down' AND first_seen >= ?", (int(time.time()), int(start.timestamp())))
         if inc:
             longest = max(inc, key=lambda r: r["end"] - r["first_seen"])
-            lines.append(f"Incidents: {len(inc)} site outage(s); longest {longest['target']} "
+            lines.append(f"Incidents: {len(inc)} site outage{'' if len(inc) == 1 else 's'}; longest {longest['target']} "
                          f"{max(1, (longest['end'] - longest['first_seen']) // 60)} min")
         else:
             lines.append("Incidents: none")
