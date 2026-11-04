@@ -36,9 +36,9 @@ PAGES.tunnels = {
     S.cache.tun = d;
     const accErr = Object.entries(d.accounts).filter(([, a]) => a.error);
     $("#tunAcc").innerHTML = accErr.length ? `<div class="panel"><div class="bd">${accErr.map(([n, a]) => `<div>${pill("warn", "CF API")} <b>${esc(n)}</b> <span class="muted">${esc(a.error)}</span></div>`).join("")}</div></div>` : "";
-    const nodes = d.nodes.map((n) => n.node);
+    const nodes = d.scoped ? [] : d.nodes.map((n) => n.node);
     $("#tunNew").innerHTML = nodes.length === 1 ? `<button class="btn sm pri op" data-act="new" data-node="${esc(nodes[0])}">+ New tunnel</button>`
-      : nodes.length ? `<span class="kebab"><button class="btn sm pri op" data-act="newpick" style="color:#fff">+ New tunnel ▾</button></span>` : "";
+      : nodes.length ? `<span class="popwrap"><button class="btn sm pri op" data-act="newpick">+ New tunnel ▾</button></span>` : "";
     const fill = (sel, label, vals, cur) => { sel.innerHTML = `<option value="">${label}: all</option>` + vals.map((x) => `<option ${x === cur ? "selected" : ""}>${esc(x)}</option>`).join(""); };
     fill($("#tunNode"), "Node", nodes, this.fnode);
     fill($("#tunAccSel"), "Account", [...new Set(this.all().map((x) => x.t.cf_account).filter(Boolean))], this.facc);
@@ -214,11 +214,12 @@ PAGES.tunnels = {
     return `<div class="dpanel">
       <div class="dh"><span class="dot ${x.health}"></span><h3>${esc(t.name)}</h3>${pill(svcClass(t.service.active), svc ? "running" : t.service.active)}
         ${e ? pill(edgeClass(e.status), "edge: " + e.status) : pill("mute", t.edge_error ? "edge: API error" : "edge: not found")}${t.remote ? pill("info", "token-run") : ""}</div>
+      ${t.scope === "routes" ? `<div class="acts2"><span class="lockt">🔒 route only</span><span class="sub">You can change your own hostnames on this tunnel; the tunnel itself belongs to someone else.</span></div>` : `
       <div class="acts2">${local ? `<button class="btn sm pri op" data-act="addhost" data-ref="${ref}">+ Hostname</button><button class="btn sm" data-act="edit" data-ref="${ref}">Edit config</button><button class="btn sm" data-act="test" data-ref="${ref}">Test a URL</button>` : ""}
         <button class="btn sm" data-act="logs" data-ref="${ref}">Logs</button><span class="grow" style="flex:1"></span>
         ${svc ? `<button class="btn sm op" data-act="svc" data-a="restart" data-ref="${ref}">Restart</button><button class="btn sm op" data-act="svc" data-a="stop" data-ref="${ref}">Stop</button>`
           : `<button class="btn sm pri op" data-act="svc" data-a="start" data-ref="${ref}">Start</button>`}
-        <button class="btn sm danger op" data-act="del" data-ref="${ref}">Delete</button></div>
+        ${S.me?.scope?.all === false ? "" : `<button class="btn sm danger op" data-act="del" data-ref="${ref}">Delete</button>`}</div>`}
       <div class="ptab2">${[["hosts", `Hostnames (${x.hosts.length})`], ["conns", "Connections"], ["details", "Details"]].map(([k, l]) => `<button data-pt="${k}" class="${this.ptab === k ? "on" : ""}">${esc(l)}</button>`).join("")}</div>
       <div class="db">${body}</div></div>`;
   },
@@ -262,7 +263,7 @@ PAGES.tunnels = {
     refresh();
   },
   async onClick(e) {
-    const vt = e.target.closest("#tunTabs button");
+    const vt = e.target.closest("#tunTabs button[data-v]");
     if (vt) { this.view = vt.dataset.v; return this.draw(); }
     const at = e.target.closest("#tunAtt button");
     if (at) { this.attention = at.dataset.a === "1"; return this.draw(); }
@@ -282,10 +283,10 @@ PAGES.tunnels = {
     if (act === "tmenu") {
       const [node, name] = b.dataset.ref.split("/").map(decodeURIComponent);
       const { t } = this.find(node, name);
-      const pick = await popMenu(b, [
+      const pick = await popMenu(b, t?.scope === "routes" ? [{ label: "Open", act: "open" }] : [
         { label: "Open", act: "open" }, { label: "+ Hostname", act: "addhost", op: true }, { label: "Edit config", act: "edit" },
         { label: "Logs", act: "logs" }, "-", { label: t?.service.active === "active" ? "Restart" : "Start", act: t?.service.active === "active" ? "restart" : "start", op: true },
-        { label: "Delete…", act: "del", cls: "danger", op: true }]);
+        ...(S.me?.scope?.all === false ? [] : [{ label: "Delete…", act: "del", cls: "danger", op: true }])]);
       if (!pick) return;
       if (pick === "open") { this.sel = `${node}/${name}`; this.view = "tunnels"; return this.draw(); }
       const fake = { dataset: { act: ["restart", "start"].includes(pick) ? "svc" : pick, a: pick, ref: b.dataset.ref }, closest: (sel) => (sel === "[data-act]" ? fake : null) };
