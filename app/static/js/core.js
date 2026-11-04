@@ -11,14 +11,33 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 class AuthError extends Error {}
 async function api(path, opts = {}) {
   const init = { method: opts.method || "GET", headers: { "X-GWC": "1", "X-GWC-Idle": String(Idle.since()) }, credentials: "same-origin" };
+  if (opts.probe) init.headers["X-GWC-Probe"] = "1";
   if (opts.body !== undefined) { init.method = opts.method || "POST"; init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opts.body); }
   const r = await fetch(path, init);
+  newVersion(r.headers.get("X-GWC-Version"));
   let j = null;
   try { j = await r.json(); } catch { /* non-json */ }
-  if (r.status === 401 && path !== "/api/login") { showLogin(j && j.idle ? `You were ${j.error}. Sign in again.` : ""); throw new AuthError("not logged in"); }
+  if (r.status === 401 && !path.startsWith("/api/login")) { showLogin(j && j.idle ? `You were ${j.error}. Sign in again.` : ""); throw new AuthError("not logged in"); }
   if (r.status === 403 && j && j.must_change) { forcePasswordChange(); throw new AuthError("password change required"); }
+  if (r.status === 403 && j && j.must_setup_2fa) { forceTwofa(); throw new AuthError("two-step sign-in required"); }
   if (!r.ok) throw new Error((j && j.error) || `HTTP ${r.status}`);
   return j;
+}
+
+/** The server was updated while this tab was open: reload to get the new pages (on its own when nobody is
+ *  using the tab, otherwise with a "Reload" bar so nothing being typed is lost). */
+let _verBar = null;
+function newVersion(v) {
+  const mine = /^\d/.test(window.GWC_VERSION || "") ? window.GWC_VERSION : S.me && S.me.version;
+  if (!v || !mine || v === mine || _verBar) return;
+  const quiet = document.hidden || Idle.since() > 120;
+  const busyForm = document.querySelector(".modal-bg, .drawer.open");
+  if (quiet && !busyForm) { location.reload(); return; }
+  _verBar = document.createElement("div");
+  _verBar.className = "banner";
+  _verBar.innerHTML = `<span>✨ Gateway Console was updated to <b>v${esc(v)}</b>. Reload to use the new version.</span><button class="btn sm pri" data-rl>Reload</button>`;
+  _verBar.querySelector("[data-rl]").addEventListener("click", () => location.reload());
+  $(".main")?.prepend(_verBar);
 }
 
 // ---------------------------------------------------------------- format
@@ -76,14 +95,19 @@ const fmt = {
     const same = fmt._parts(new Date(typeof ts === "number" ? ts * 1000 : ts)).y === fmt._parts(new Date()).y;
     return `${fmt.date(ts, { year: !same })}, ${fmt.clock(ts)}`;
   },
+  /** short weekday ("Mon") in the user's time zone */
+  wd(ts) {
+    const o = { weekday: "short" };
+    if (S.prefs?.tz) o.timeZone = S.prefs.tz;
+    try { return new Intl.DateTimeFormat("en-GB", o).format(new Date(ts * 1000)); } catch { return new Intl.DateTimeFormat("en-GB", { weekday: "short" }).format(new Date(ts * 1000)); }
+  },
   /** "Today" / "Yesterday" / "Mon 3 Nov 2026" heading for a day */
   day(ts) {
     const k = (t) => fmt.date(t, {});
     const now = Date.now() / 1000;
     if (k(ts) === k(now)) return "Today";
     if (k(ts) === k(now - 86400)) return "Yesterday";
-    const wd = new Intl.DateTimeFormat("en-GB", { weekday: "short", ...(S.prefs?.tz ? { timeZone: S.prefs.tz } : {}) }).format(new Date(ts * 1000));
-    return `${wd} ${fmt.date(ts)}`;
+    return `${fmt.wd(ts)} ${fmt.date(ts)}`;
   },
   /** "1 user" / "2 users" */
   plural: (n, one, many) => `${fmt.n(n)} ${n === 1 ? one : (many || one + "s")}`,
@@ -244,6 +268,8 @@ function showLogin(msg = "") {
   $("#app").classList.add("hidden");
   $("#login").classList.remove("hidden");
   $("#loginErr").textContent = msg;
+  $("#loginForm").classList.remove("hidden");
+  $("#codeForm").classList.add("hidden");
   $("#loginErr").classList.toggle("info", !!msg);
   loginFooter();
   $("#loginForm [name=user]").focus();
@@ -308,6 +334,14 @@ function initials(name) {
   const p = String(name || "?").split(/[^A-Za-z0-9]+/).filter(Boolean);
   return ((p[0] || "?")[0] + (p[1] ? p[1][0] : (p[0] || "").slice(1, 2))).toUpperCase();
 }
+/** Scoped users see what they manage at the top of every page (the server only returns those things). */
+function renderScopeBar(sc) {
+  const el = $("#scopebar");
+  if (!sc || sc.all) { el.classList.add("hidden"); return; }
+  const chips = [...(sc.tunnels || []).map((t) => `tunnel ${t.split("/")[1]}`), ...(sc.domains || []), ...(sc.backends || []).map((b) => b.split("/")[1])];
+  el.innerHTML = `<span>🔒 You manage <b>only part</b> of this dashboard:</span>${chips.map((c) => `<span class="chip">${esc(c)}</span>`).join("")}<span class="grow"></span><span class="sub">Ask a superadmin for more access</span>`;
+  el.classList.remove("hidden");
+}
 function renderUser(me) {
   $("#uav").textContent = initials(me.user);
   $("#who").textContent = me.user;
@@ -323,14 +357,25 @@ function toggleUserMenu(open) {
   m.classList.toggle("hidden", !on);
   $("#ucard").classList.toggle("open", on);
 }
-function footerHtml(version, upd) {
+/** Footer status from the last update check: only "✓ up to date" when that check is recent and worked. */
+function updStatus(d) {
+  if (!d || !d.update) return "";
+  const u = d.update, sep = `<span class="sep">·</span>`;
+  const av = u.available || [];
+  if (av.length) return `<a href="#/settings/about" class="updlink">v${esc(String(av[0].version).replace(/^v/, ""))} available</a>${sep}`;
+  if (d.settings && d.settings.update_check === false) return `<span class="muted">update checks off</span>${sep}`;
+  if (u.error) return `<a href="#/settings/about" class="warnlink" title="${esc(u.error)}">update check failed</a>${sep}`;
+  if (!u.checked_at) return `<span class="muted">not checked yet</span>${sep}`;
+  const age = Date.now() / 1000 - u.checked_at;
+  if (age > 3 * 86400) return `<a href="#/settings/about" class="warnlink">last checked ${esc(fmt.ago(u.checked_at))}</a>${sep}`;
+  return `<span class="ok" title="checked ${esc(fmt.ago(u.checked_at))}">✓ up to date</span>${sep}`;
+}
+function footerHtml(version, status) {
   const year = new Date().getFullYear();
-  const status = upd === undefined ? "" : upd ? `<a href="#/settings/about" class="updlink">${esc(upd)} available</a><span class="sep">·</span>`
-    : `<span class="ok">✓ up to date</span><span class="sep">·</span>`;
-  return `<span class="brand3">GW<b>//</b>CONSOLE</span><span>v${esc(version || "")}</span><span class="sep">·</span>${status}<a href="#" data-notes>Release notes</a>
+  return `<span class="brand3">GW<b>//</b>CONSOLE</span><span>v${esc(version || "")}</span><span class="sep">·</span>${status || ""}<a href="#" data-notes>Release notes</a>
     <span class="grow"></span><span>© ${year} <a href="https://adproject.fun" target="_blank" rel="noopener">ADProject</a>. All rights reserved.</span>`;
 }
-function renderFooter(upd) { $("#pfoot").innerHTML = footerHtml(S.me?.version, upd); }
+function renderFooter(sys) { $("#pfoot").innerHTML = footerHtml(S.me?.version, updStatus(sys)); }
 async function showWhatsNew() {
   if (can("superadmin")) { location.hash = "#/settings/about"; return; }
   const d = await api("/api/system");
@@ -338,7 +383,10 @@ async function showWhatsNew() {
 }
 async function loginFooter() {
   try {
-    const h = await fetch("/api/health").then((r) => r.json());
+    const r = await fetch("/api/health");
+    const h = await r.json();
+    const f = $("#loginForm");
+    if (/^\d/.test(window.GWC_VERSION || "") && h.version !== window.GWC_VERSION && !f.user.value && !f.password.value) { location.reload(); return; }
     $("#loginFoot").innerHTML = `GW//CONSOLE v${esc(h.version)} · © ${new Date().getFullYear()} <a href="https://adproject.fun" target="_blank" rel="noopener">ADProject</a>. All rights reserved.`;
   } catch { /* offline */ }
 }
@@ -346,12 +394,14 @@ async function loginFooter() {
 async function boot() {
   let me;
   try {
-    me = await api("/api/me");
+    me = await api("/api/me", { probe: true });
   } catch (e) { if (!(e instanceof AuthError)) toast(e.message, "bad"); return; }
+  if (me.signed_in === false) { showLogin(me.idle ? `You were ${me.error}. Sign in again.` : ""); return; }
   S.user = me.user; S.role = me.role; S.me = me; S.prefs = me.prefs || {};
   document.body.dataset.role = me.role;
   renderUser(me);
   renderFooter();
+  renderScopeBar(me.scope);
   $("#auto").checked = S.prefs.auto_refresh !== false;
   Idle.mark();
   Idle.start(me.idle_limit);
@@ -359,12 +409,10 @@ async function boot() {
   $("#login").classList.add("hidden");
   $("#app").classList.remove("hidden");
   if (me.must_change) { await forcePasswordChange(); return; }
+  if (me.must_setup_2fa) { await forceTwofa(); return; }
   S.inv = await api("/api/inventory");
   updateBanner(me.updated);
-  if (can("superadmin")) api("/api/system").then((d) => {
-    const av = (d.update || {}).available || [];
-    renderFooter(av.length ? av[0].version : null);
-  }).catch(() => {});
+  if (can("superadmin")) api("/api/system").then((d) => renderFooter(d)).catch(() => {});
   if (!location.hash && S.prefs.start_page && S.prefs.start_page !== "overview") history.replaceState(null, "", `#/${S.prefs.start_page}`);
   // fresh install: walk the superadmin through nodes → Cloudflare → alerts (no extra hashchange)
   if (me.setup && !/^#\/setup/.test(location.hash)) history.replaceState(null, "", "#/setup");
@@ -379,8 +427,9 @@ $("#loginForm").addEventListener("submit", async (e) => {
   const f = new FormData(e.target);
   $("#loginErr").textContent = "";
   try {
-    await api("/api/login", { body: { user: f.get("user"), password: f.get("password") } });
+    const r = await api("/api/login", { body: { user: f.get("user"), password: f.get("password") } });
     e.target.reset();
+    if (r.twofa) return showCodeStep(r);
     boot();
   } catch (err) { $("#loginErr").textContent = err.message; }
 });
@@ -415,6 +464,118 @@ function changePassword(forced) {
   });
 }
 let _forcing = false;
+// ---------------------------------------------------------------- two-step sign-in (v1.5)
+let _ticket = null;
+function showCodeStep(r) {
+  _ticket = r.ticket;
+  const f = $("#codeForm");
+  $("#loginForm").classList.add("hidden");
+  f.classList.remove("hidden");
+  f.reset();
+  f.code.classList.remove("hidden"); f.recovery.classList.add("hidden");
+  $("#useRc").textContent = "Use a recovery code";
+  $("#codeWho").innerHTML = `Signed in as <b>${esc(r.user)}</b> · enter the 6-digit code from your authenticator app.`;
+  $("#codeErr").textContent = "";
+  f.code.focus();
+}
+$("#codeForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target, rc = !f.recovery.classList.contains("hidden");
+  $("#codeErr").textContent = "";
+  try {
+    await api("/api/login/2fa", { body: { ticket: _ticket, code: rc ? "" : f.code.value, recovery: rc ? f.recovery.value : "", remember: f.remember.checked } });
+    _ticket = null;
+    boot();
+  } catch (err) {
+    $("#codeErr").textContent = err.message;
+    if (/expired|password again/.test(err.message)) setTimeout(() => showLogin(err.message), 1200);
+    f.code.select?.();
+  }
+});
+$("#codeForm [name=code]").addEventListener("input", (e) => {
+  e.target.value = e.target.value.replace(/\D/g, "").slice(0, 6);
+  if (e.target.value.length === 6) $("#codeForm").requestSubmit();
+});
+$("#useRc").addEventListener("click", (e) => {
+  e.preventDefault();
+  const f = $("#codeForm"), rc = f.recovery.classList.toggle("hidden");
+  f.code.classList.toggle("hidden", !rc);
+  e.target.textContent = rc ? "Use a recovery code" : "Use the code from my app";
+  $("#codeWho").innerHTML = rc ? $("#codeWho").innerHTML.replace(/ · .*/, " · enter the 6-digit code from your authenticator app.")
+    : $("#codeWho").innerHTML.replace(/ · .*/, " · enter one of the recovery codes you saved. Each one works once.");
+  (rc ? f.code : f.recovery).focus();
+});
+$("#codeBack").addEventListener("click", (e) => { e.preventDefault(); _ticket = null; showLogin(); });
+
+/** Set up two-step sign-in: QR code → code from the app → recovery codes (shown once). Resolves true when on. */
+async function twofaSetup(required = false) {
+  let d;
+  try { d = await api("/api/account/2fa/start", { body: {} }); } catch (err) { toast(err.message, "bad"); return false; }
+  const w = document.createElement("div");
+  w.innerHTML = `${required ? `<div class="scopenote">Your superadmin requires two-step sign-in for your account. Set it up now to continue.</div>` : ""}
+    <div class="tfa"><div class="qrbox">${d.svg}</div><div class="form" style="gap:12px"><ol>
+      <li>Open an authenticator app on your phone (Google Authenticator, Microsoft Authenticator, 1Password, Aegis…).</li>
+      <li><b>Scan the code</b>, or type this key: <div class="mono key">${esc(d.key)}</div></li>
+      <li><b>Enter the 6-digit code</b> the app shows.</li></ol>
+      <label>Code from the app<input class="otp" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••"></label>
+      <div class="ferr" data-err></div>
+      <div class="hint">Server time ${esc(fmt.clock(d.server_time, true))} — if codes keep failing, check the phone's clock is set automatically.</div></div></div>`;
+  const codes = await new Promise((resolve) => {
+    let got = null;
+    modal({ title: "Turn on two-step sign-in", body: w, locked: required, actions: [...(required ? [] : [{ label: "Cancel", value: false }]), { label: "Turn on", cls: "pri", value: "go" }],
+      onOpen: (bg) => {
+        const go = async () => {
+          const err = $("[data-err]", w), btn = $(".ft .pri", bg);
+          err.textContent = ""; btn.disabled = true;
+          try {
+            const r = await api("/api/account/2fa/confirm", { body: { code: $("[name=code]", w).value } });
+            got = r.recovery_codes; bg._close(true);
+          } catch (ex) { err.textContent = ex.message; btn.disabled = false; $("[name=code]", w).select(); }
+        };
+        // "Turn on" checks the code first instead of closing the dialog
+        $(".ft .pri", bg).addEventListener("click", (e) => { e.stopPropagation(); go(); }, true);
+        $("[name=code]", w).addEventListener("input", (e) => { e.target.value = e.target.value.replace(/\D/g, "").slice(0, 6); if (e.target.value.length === 6) go(); });
+        $("[name=code]", w).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+        setTimeout(() => $("[name=code]", w).focus(), 50);
+      } }).then(() => resolve(got));
+  });
+  if (!codes) return false;
+  await showRecoveryCodes(codes, true);
+  return true;
+}
+async function showRecoveryCodes(codes, first) {
+  const txt = `GW//CONSOLE recovery codes for ${S.me?.user || ""}\nEach code signs you in once if you lose your phone.\n\n${codes.join("\n")}\n`;
+  const body = `<div class="small">${first ? `Two-step sign-in is <b style="color:var(--ok)">on</b>. ` : ""}If you lose your phone, each of these codes signs you in once. <b>They are shown only now.</b></div>
+    <div class="rcodes">${codes.map((c) => `<span>${esc(c)}</span>`).join("")}</div>
+    <div class="row" style="gap:8px"><button class="btn sm" type="button" data-dl>Download .txt</button><button class="btn sm" type="button" data-cp>Copy</button><span class="grow"></span><span class="sub">${codes.length} codes</span></div>`;
+  await modal({ title: "Save your recovery codes", size: "sm", body, locked: true, actions: [{ label: "I've saved them", cls: "pri", value: true }],
+    onOpen: (bg) => {
+      $("[data-dl]", bg).addEventListener("click", () => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([txt], { type: "text/plain" }));
+        a.download = `gwconsole-recovery-codes-${S.me?.user || "user"}.txt`; a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      });
+      $("[data-cp]", bg).addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(txt); toast("Copied", "ok"); } catch { toast("Copy didn't work here — use Download", "bad"); }
+      });
+    } });
+}
+let _forcing2 = false;
+async function forceTwofa() {
+  if (_forcing2) return;
+  _forcing2 = true;
+  $("#login").classList.add("hidden");
+  $("#app").classList.remove("hidden");
+  let done = false;
+  while (!done) {
+    done = await twofaSetup(true);
+    if (!done && !(await confirmBox("Two-step sign-in is required", "<p>You can't use the dashboard until it's on. Try again, or sign out.</p>", "Try again"))) { _forcing2 = false; return signOut(); }
+  }
+  _forcing2 = false;
+  boot();
+}
+
 async function forcePasswordChange() {
   if (_forcing) return;
   _forcing = true;
@@ -458,6 +619,8 @@ function route() {
   const same = page === S.page && $("#view").dataset.page === page && JSON.stringify(parts.slice(1)) === JSON.stringify(S.params);
   S.page = page; S.params = parts.slice(1);
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.p === page));
+  const here = `#/${[page, ...S.params].map(encodeURIComponent).join("/")}`;
+  $$("#umenu a[href^='#/account']").forEach((a) => a.classList.toggle("on", a.getAttribute("href") === here));
   if (!same) {
     const fresh = $("#view").cloneNode(false); // drop old listeners
     $("#view").replaceWith(fresh);
