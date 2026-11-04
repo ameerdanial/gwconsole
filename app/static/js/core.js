@@ -411,6 +411,7 @@ async function boot() {
   if (me.must_change) { await forcePasswordChange(); return; }
   if (me.must_setup_2fa) { await forceTwofa(); return; }
   S.inv = await api("/api/inventory");
+  twofaNudge(me);
   updateBanner(me.updated);
   if (can("superadmin")) api("/api/system").then((d) => renderFooter(d)).catch(() => {});
   if (!location.hash && S.prefs.start_page && S.prefs.start_page !== "overview") history.replaceState(null, "", `#/${S.prefs.start_page}`);
@@ -544,6 +545,7 @@ async function twofaSetup(required = false) {
   return true;
 }
 async function showRecoveryCodes(codes, first) {
+  if (first) { $("#tfaBanner")?.remove(); if (S.me) S.me.totp_on = true; }
   const txt = `GW//CONSOLE recovery codes for ${S.me?.user || ""}\nEach code signs you in once if you lose your phone.\n\n${codes.join("\n")}\n`;
   const body = `<div class="small">${first ? `Two-step sign-in is <b style="color:var(--ok)">on</b>. ` : ""}If you lose your phone, each of these codes signs you in once. <b>They are shown only now.</b></div>
     <div class="rcodes">${codes.map((c) => `<span>${esc(c)}</span>`).join("")}</div>
@@ -666,6 +668,27 @@ function mdLite(text) {
   flush();
   if (inList) html += "</ul>";
   return html;
+}
+
+/** Superadmins without two-step sign-in get a reminder (installs upgraded from 1.4 don't require it). "Not now" hides it
+ *  for 30 days in this browser. */
+function twofaNudge(me) {
+  $("#tfaBanner")?.remove();
+  if (me.role !== "superadmin" || me.totp_on || me.setup) return;
+  let until = 0;
+  try { until = +localStorage.getItem("gwc-2fa-nudge") || 0; } catch { /* storage blocked: just show it */ }
+  if (until > Date.now()) return;
+  const el = document.createElement("div");
+  el.id = "tfaBanner";
+  el.className = "banner";
+  el.innerHTML = `<span>🔐 You're a superadmin without <b>two-step sign-in</b>. Turn it on so a stolen password isn't enough.</span>
+    <button class="btn sm pri" data-on>Turn on</button><button class="btn ghost sm" data-x>Not now</button>`;
+  el.querySelector("[data-x]").addEventListener("click", () => {
+    try { localStorage.setItem("gwc-2fa-nudge", String(Date.now() + 30 * 86400e3)); } catch { /* ignore */ }
+    el.remove();
+  });
+  el.querySelector("[data-on]").addEventListener("click", () => { el.remove(); location.hash = "#/account"; });
+  $(".main").prepend(el);
 }
 
 function updateBanner(u) {
