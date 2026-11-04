@@ -235,7 +235,7 @@ PAGES.monitoring = {
     const f = document.createElement("div");
     const route = r.frontend ? `${r.tunnel ? `tunnel <b>${esc(r.tunnel.name)}</b><span class="arr">→</span>` : ""}${esc(s.internal)}<span class="arr">→</span>HAProxy <b>${esc(r.frontend)}</b><span class="arr">→</span><b>${esc(r.backend || "?")}</b>`
       : r.tunnel ? `tunnel <b>${esc(r.tunnel.name)}</b><span class="arr">→</span>${esc(s.internal)} (not through HAProxy)` : esc(s.internal || "public only");
-    f.innerHTML = `<div class="mini" style="margin-bottom:12px">
+    f.innerHTML = `<div class="mcards" style="margin-bottom:12px">
         <div><div class="l">Public</div><div class="v">${s.kind === "tcp" || o.public === false ? "—" : this.side(st.pub)}</div></div>
         <div><div class="l">Internal</div><div class="v">${s.internal ? this.side(st.int) : "—"}</div></div>
         <div><div class="l">Uptime 24 h · 7 days</div><div class="v">${fmt.pct(s.uptime24, 2)} · ${fmt.pct(s.uptime7, 2)}</div></div></div>
