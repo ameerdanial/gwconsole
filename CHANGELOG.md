@@ -4,6 +4,8 @@ All notable changes to Gateway Console. Versions follow [Semantic Versioning](ht
 MAJOR for breaking config/install changes, MINOR for new features, PATCH for fixes.
 
 ## [Unreleased]
+
+## [1.5.0] - 2026-11-05
 ### Added
 - **Choose what each user can manage** (Settings → Users → Access…):
   - "Everything" (as before) or "Only what I pick": whole tunnels, domains such as `shop.example.com`
@@ -306,7 +308,8 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
   rule tester; config editor with validate → diff → backup → apply → health check → auto-rollback;
   audit log; scrypt login; SSH key access with `from=` restriction; installer and node prep script.
 
-[Unreleased]: ../../compare/v1.4.1...HEAD
+[Unreleased]: ../../compare/v1.5.0...HEAD
+[1.5.0]: ../../compare/v1.4.1...v1.5.0
 [1.4.1]: ../../compare/v1.4.0...v1.4.1
 [1.4.0]: ../../compare/v1.3.0...v1.4.0
 [1.2.0]: ../../compare/v1.1.0...v1.2.0
