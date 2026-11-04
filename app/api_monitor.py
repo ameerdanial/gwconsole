@@ -15,7 +15,7 @@ from fastapi.responses import Response
 from . import monitor, sites, traffic
 from .monitor import series, uptime, valid_unit
 from .sshpool import NodeError
-from .state import audit, need, shielded, st
+from .state import audit, need, scope, shielded, st
 
 router = APIRouter(prefix="/api")
 HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
@@ -50,15 +50,46 @@ def _servers() -> list[dict]:
     return out
 
 
+async def visible_nodes(sc) -> set[str]:
+    """For a scoped user: the servers behind their own backends (matched by address), so they see those
+    servers' health and can restart their watched services. Gateways themselves stay hidden."""
+    if sc.all:
+        return {n.name for n in st.s.haproxy_nodes + st.s.cloudflared_nodes + st.s.server_nodes}
+    ips = set()
+    for node, m in (await sites.hp_models()).items():
+        v = await sites.hp_view(sc, node, m)
+        for b in m.get("backends") or []:
+            if b["name"] in v.own_backends:
+                for srv in b.get("servers") or []:
+                    ips.add(str(srv.get("addr", "")).rsplit(":", 1)[0].strip("[]"))
+    return {n.name for n in st.s.server_nodes if n.host in ips}
+
+
+async def _scoped_series_ok(sc, name: str) -> bool:
+    if sc.all:
+        return True
+    kind, _, ref = name.partition(":")
+    if kind.startswith("site."):
+        return sc.host_ok(ref)
+    if kind.startswith("srv."):
+        return ref in await visible_nodes(sc)
+    if kind in ("hp.req", "hp.5xx") and "/be:" in ref:
+        node, _, be = ref.partition("/be:")
+        return (await sites.hp_view(sc, node)).backend_visible(be)
+    return False
+
+
 @router.get("/monitor")
-async def monitor_page():
+async def monitor_page(request: Request):
+    sc = scope(request)
     cfg = st.store.monitor_cfg()
     rows = st.store.db.q("SELECT * FROM checks ORDER BY host")
-    items = [_site(r, cfg) for r in rows]
+    items = [_site(r, cfg) for r in rows if sc.host_ok(r["host"])]
     active = [s for s in items if not s["excluded"]]
-    servers = _servers()
+    seen = await visible_nodes(sc)
+    servers = [s for s in _servers() if s["name"] in seen]
     certs = [{"where": f"{c['node']}: {c['file']}", "days": c["days"], "subject": c.get("subject", "")}
-             for c in (st.store.get("certs", {}) or {}).get("items", [])]
+             for c in (st.store.get("certs", {}) or {}).get("items", []) if c["node"] in seen]
     certs += [{"where": s["host"], "days": s["state"]["cert"]["days"], "subject": s["state"]["cert"].get("issuer", ""),
                "public": True} for s in active if "days" in (s["state"].get("cert") or {})]
     pub_ms = sorted(s["state"]["pub"]["ms"] for s in active
@@ -71,10 +102,11 @@ async def monitor_page():
     m = st.monitor if getattr(st, "monitor", None) else None
     day = monitor.local_day(time.time(), cfg)
     top_be = [r["name"] for r in st.store.db.q(
-        "SELECT name FROM traffic_daily WHERE source='hp' AND day=? AND name LIKE '%/be:%' ORDER BY requests DESC LIMIT 4",
+        "SELECT name FROM traffic_daily WHERE source='hp' AND day=? AND name LIKE '%/be:%' ORDER BY requests DESC LIMIT 12",
         (day,))]
+    top_be = [n for n in top_be if await _scoped_series_ok(sc, f"hp.req:{n}")][:8]
     return {
-        "top_backends": top_be, "hp_nodes": [n.name for n in st.s.haproxy_nodes],
+        "top_backends": top_be, "hp_nodes": [n.name for n in st.s.haproxy_nodes] if sc.all else [],
         "kpi": {"sites_up": up, "sites_total": len(active),
                 "down": [s["host"] for s in active if s["state"].get("status") == "down"],
                 "median_ms": pub_ms[len(pub_ms) // 2] if pub_ms else None,
@@ -89,8 +121,11 @@ async def monitor_page():
 
 
 @router.get("/monitor/series")
-async def monitor_series(names: str, range: str = "24h", agg: str = "avg"):
+async def monitor_series(request: Request, names: str, range: str = "24h", agg: str = "avg"):
+    sc = scope(request)
     lst = [n for n in names.split(",") if n][:40]
+    if not sc.all:
+        lst = [n for n in lst if await _scoped_series_ok(sc, n)]
     return {"range": range, "series": series(lst, range, "sum" if agg == "sum" else "avg")}
 
 
@@ -105,6 +140,7 @@ async def monitor_run(request: Request):
 @router.put("/monitor/sites/{host}")
 async def site_update(request: Request, host: str, body: dict = Body(...)):
     need(request, "operator")
+    scope(request).need_host(host)
     r = st.store.db.one("SELECT * FROM checks WHERE host=?", (host,))
     if not r:
         raise KeyError(f"no check for {host}")
@@ -143,6 +179,7 @@ async def site_update(request: Request, host: str, body: dict = Body(...)):
 async def site_add(request: Request, body: dict = Body(...)):
     need(request, "operator")
     host = str(body.get("host", "")).strip().lower()
+    scope(request).need_host(host)
     kind = "tcp" if body.get("kind") == "tcp" else "http"
     internal = str(body.get("internal") or "").strip()
     if not HOST_RE.match(host):
@@ -165,6 +202,7 @@ async def site_add(request: Request, body: dict = Body(...)):
 @router.delete("/monitor/sites/{host}")
 async def site_delete(request: Request, host: str):
     need(request, "operator")
+    scope(request).need_host(host)
     r = st.store.db.one("SELECT source FROM checks WHERE host=?", (host,))
     if not r:
         raise KeyError(f"no check for {host}")
@@ -179,6 +217,7 @@ async def site_delete(request: Request, host: str):
 async def service_add(request: Request, body: dict = Body(...)):
     need(request, "operator")
     node, unit = str(body.get("node", "")), str(body.get("unit", "")).strip()
+    await _need_node(request, node)
     st.s.node(node)
     if "." not in unit:
         unit += ".service"
@@ -193,6 +232,7 @@ async def service_add(request: Request, body: dict = Body(...)):
 @router.delete("/monitor/services/{node}/{unit}")
 async def service_delete(request: Request, node: str, unit: str):
     need(request, "operator")
+    await _need_node(request, node)
     st.store.db.x("DELETE FROM services WHERE node=? AND unit=?", (node, unit))
     audit(request, "unwatch service", f"{node}:{unit}", True)
     return {"ok": True}
@@ -203,6 +243,7 @@ async def service_delete(request: Request, node: str, unit: str):
 async def service_restart(request: Request, body: dict = Body(...)):
     need(request, "operator")
     node, unit = str(body.get("node", "")), str(body.get("unit", ""))
+    await _need_node(request, node)
     n = st.s.node(node)
     if not st.store.db.one("SELECT 1 FROM services WHERE node=? AND unit=?", (node, unit)) or not valid_unit(unit):
         raise ValueError("only watched services can be restarted here")
@@ -221,12 +262,20 @@ async def service_restart(request: Request, body: dict = Body(...)):
 @router.get("/monitor/services/suggest/{node}")
 async def service_suggest(request: Request, node: str):
     need(request, "operator")
+    await _need_node(request, node)
     n = st.s.node(node)
     r = await st.pool.run(n, "systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null "
                              "| awk '{print $1}' | head -200", root=False)
     skip = re.compile(r"^(systemd-|dbus|getty|serial-getty|user@|cron|rsyslog|ssh|polkit|networkd|ifup|console-|"
                       r"unattended|packagekit|udisks|accounts-daemon|snapd|multipathd|qemu-guest|chrony|lxcfs)")
     return {"units": [u for u in r.out.split() if u.endswith(".service") and not skip.match(u)]}
+
+
+async def _need_node(request: Request, node: str):
+    sc = scope(request)
+    if not sc.all and node not in await visible_nodes(sc):
+        from .scope import ScopeError
+        raise ScopeError(f"server {node} isn't in your access")
 
 
 # ---- Settings → Monitoring -----------------------------------------------------------
@@ -259,22 +308,37 @@ async def summary_now(request: Request):
 
 
 # ---- Traffic ---------------------------------------------------------------------------
+async def _traffic(request: Request, rng: str) -> dict:
+    sc = scope(request)
+    if sc.all:
+        return await traffic.report(rng)
+    views = {n: await sites.hp_view(sc, n, m) for n, m in (await sites.hp_models()).items()}
+
+    def hp_ok(name: str) -> bool:
+        node, _, rest = name.partition("/")
+        v = views.get(node)
+        kind, _, obj = rest.partition(":")
+        return bool(v) and ((kind == "fe" and obj in v.frontends) or (kind == "be" and v.backend_visible(obj)))
+    return await traffic.report(rng, allow_host=sc.host_ok, allow_hp=hp_ok)
+
+
 @router.get("/traffic")
-async def traffic_page(range: str = "7d"):
-    return await traffic.report(range)
+async def traffic_page(request: Request, range: str = "7d"):
+    return await _traffic(request, range)
 
 
 @router.post("/traffic/refresh")
 @shielded
 async def traffic_refresh(request: Request):
     need(request, "operator")
+    scope(request).need_all("Fetching traffic from Cloudflare")
     await traffic.collector.maybe_refresh(force=True)
     return {"ok": True, "status": st.store.get("traffic_status", {})}
 
 
 @router.get("/traffic.csv")
-async def traffic_csv(range: str = "7d", tab: str = "cf"):
-    rep = await traffic.report(range)
+async def traffic_csv(request: Request, range: str = "7d", tab: str = "cf"):
+    rep = await _traffic(request, range)
     buf = io.StringIO()
     csv.writer(buf).writerows(traffic.csv_rows(rep, "hp" if tab == "hp" else "cf"))
     name = f"traffic-{'haproxy' if tab == 'hp' else 'sites'}-{rep['range']}-{rep['days'][1]}.csv"
@@ -320,10 +384,12 @@ async def enrich_tunnels(data: dict, hp_status: list[dict]) -> dict:
 
 
 # ---- Overview ----------------------------------------------------------------------------
-async def overview_extra() -> dict:
+async def overview_extra(sc=None) -> dict:
     """What the Overview page shows besides gateways and alerts: sites, servers, today's traffic."""
+    from .scope import Scope
+    sc = sc or Scope(all=True)
     cfg = st.store.monitor_cfg()
-    rows = st.store.db.q("SELECT * FROM checks WHERE excluded=0 ORDER BY host")
+    rows = [r for r in st.store.db.q("SELECT * FROM checks WHERE excluded=0 ORDER BY host") if sc.host_ok(r["host"])]
     order = {"down": 0, "failing": 1, "slow": 2, "up": 3}
     sites_ = []
     for r in rows:
@@ -335,8 +401,9 @@ async def overview_extra() -> dict:
                        "ms": p.get("ms"), "err": p.get("err"), "spark": [v for _, v in pts][-48:]})
     sites_.sort(key=lambda x: (order.get(x["status"], 4), x["host"]))
     servers = []
+    seen = await visible_nodes(sc)
     for s_ in _servers():
-        if not s_.get("at") and not s_.get("error"):
+        if (not s_.get("at") and not s_.get("error")) or s_["name"] not in seen:
             continue
         servers.append({"name": s_["name"], "kind": s_["kind"], "error": s_.get("error"),
                         "cpu": round(s_["load"][0] * 100 / max(1, s_.get("cores") or 1)) if s_.get("load") else None,
@@ -346,6 +413,11 @@ async def overview_extra() -> dict:
     yday = monitor.local_day(time.time() - 86400, cfg)
 
     def total(d, src):
+        if not sc.all:                       # scoped: only their hostnames (Cloudflare numbers)
+            if src != "cf":
+                return 0
+            return sum(int(r["requests"] or 0) for r in st.store.db.q(
+                "SELECT name, requests FROM traffic_daily WHERE day=? AND source='cf'", (d,)) if sc.host_ok(r["name"]))
         r = st.store.db.one("SELECT SUM(requests) AS n FROM traffic_daily WHERE day=? AND source=?" +
                             (" AND name LIKE '%/fe:%'" if src == "hp" else ""), (d, src))
         return int(r["n"] or 0) if r else 0
@@ -356,6 +428,7 @@ async def overview_extra() -> dict:
             hours = await traffic.collector.today_hours()
         except Exception:
             hours = {}
+    hours = {h: v for h, v in hours.items() if sc.host_ok(h)}
     top = sorted(hours, key=lambda h: -sum(hours[h]))
     chart = [{"name": h, "data": hours[h]} for h in top[:3]]
     if len(top) > 3:
