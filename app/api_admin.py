@@ -54,8 +54,10 @@ async def change_my_password(request: Request, body: dict = Body(...)):
     if new == str(body.get("current", "")):
         raise ValueError("pick a password different from the current one")
     st.store.set_password(u["id"], new, must_change=False)
-    st.store.drop_user_sessions(u["id"], keep_tok=request.cookies.get(COOKIE))
-    audit(request, "password change", u["username"], True)
+    others = body.get("sign_out_others", True) is not False
+    if others:
+        st.store.drop_user_sessions(u["id"], keep_tok=request.cookies.get(COOKIE))
+    audit(request, "password change", u["username"], True, "other browsers signed out" if others else "")
     return {"ok": True}
 
 
