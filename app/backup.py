@@ -3,11 +3,14 @@
   make()       consistent snapshot (SQLite online backup) of /etc/gwconsole + the database + audit log
   encrypt()    passphrase-protected copy for downloading (scrypt + AES-256-GCM, file starts with GWCBAK1)
   restore()    put a backup (plain or encrypted) back in place; refuses anything outside the two folders
+  inspect()    what a backup holds (version, date, users, nodes, accounts) and whether its database is intact
   copy()       copy a backup to a managed node over SSH with the dashboard key and the node's pinned host key
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -16,6 +19,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from datetime import datetime
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
@@ -128,17 +132,30 @@ def decrypt(blob: bytes, passphrase: str) -> bytes:
 
 
 def check_archive(data: bytes) -> list[str]:
-    """Members must be regular files under etc/gwconsole/ or var/lib/gwconsole/ — nothing else."""
+    """The files a restore puts back: regular files directly in etc/gwconsole/ or var/lib/gwconsole/.
+
+    Upgrade backups made by install.sh also hold the two folders themselves and what's below them
+    (config history, the upload spool): those entries are skipped, never extracted. Anything else
+    (links, devices, `..`, absolute paths, other folders) means the archive is refused."""
     names = []
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         for m in tar.getmembers():
-            if m.name == "GWCONSOLE-BACKUP":
+            n = m.name[2:] if m.name.startswith("./") else m.name
+            if n == "GWCONSOLE-BACKUP":
                 continue
-            ok = (m.isfile() and re.fullmatch(r"(etc/gwconsole|var/lib/gwconsole)/[A-Za-z0-9_.\-]+", m.name)
-                  and ".." not in m.name)
-            if not ok:
+            root = next((r for r in ("etc/gwconsole", "var/lib/gwconsole") if n.rstrip("/") == r or n.startswith(r + "/")), None)
+            if root is None or ".." in n.split("/"):
                 raise ValueError(f"unexpected entry in backup: {m.name}")
-            names.append(m.name)
+            rest = n[len(root):].strip("/").split("/") if n.rstrip("/") != root else []
+            if not rest:                                          # the folder itself
+                if not m.isdir():
+                    raise ValueError(f"unexpected entry in backup: {m.name}")
+                continue
+            if len(rest) > 1 or m.isdir():                        # a sub-folder and what's in it: skipped
+                continue
+            if not (m.isfile() and re.fullmatch(r"[A-Za-z0-9_.\-]+", rest[0]) and n == m.name):
+                raise ValueError(f"unexpected entry in backup: {m.name}")
+            names.append(n)
     if "etc/gwconsole/secret.key" not in names:
         raise ValueError("this doesn't look like a Gateway Console backup (no secret.key)")
     return names
@@ -146,17 +163,16 @@ def check_archive(data: bytes) -> list[str]:
 
 def restore(data: bytes, root: str = "/") -> list[str]:
     names = check_archive(data)
+    for ext in ("-wal", "-shm"):          # the current database's journal must not be applied to the restored copy
+        try:                              # (a journal inside the backup, if any, is put back below)
+            os.unlink(os.path.join(root, "var/lib/gwconsole/gwconsole.db" + ext))
+        except OSError:
+            pass
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         for name in names:
             m = tar.getmember(name)
             dest = os.path.join(root, name)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            if name.endswith("gwconsole.db"):
-                for ext in ("-wal", "-shm"):
-                    try:
-                        os.unlink(dest + ext)
-                    except OSError:
-                        pass
             with tar.extractfile(m) as src, open(dest + ".restore", "wb") as out:
                 shutil.copyfileobj(src, out)
             os.replace(dest + ".restore", dest)
@@ -187,3 +203,87 @@ def copy(path: str, node: dict, key_file: str, dest_dir: str, keep: int = 14) ->
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip()[:300] or f"ssh exit {r.returncode}")
     return f"copied to {user}@{host}:{dest_dir}/{os.path.basename(path)}"
+
+
+MAX_UPLOAD = 200 * 1024 * 1024
+VERSION_RE = re.compile(r"^gwconsole (\d+\.\d+\.\d+)", re.MULTILINE)
+
+
+def vt(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in str(v).lstrip("v").split("."))
+    except ValueError:
+        return (0, 0, 0)
+
+
+def inspect(data: bytes, current_key: bytes | None = None, name: str = "") -> dict:
+    """What a (decrypted) backup holds, without changing anything: the version that made it, when, counts of
+    users / nodes / Cloudflare accounts read from its database copy (opened read-only in a temp folder),
+    PRAGMA integrity_check, and whether its secret.key is the one this dashboard uses."""
+    names = check_archive(data)
+    out = {"files": len(names), "version": "", "created": "", "created_ts": 0, "users": [], "nodes": [], "cf_accounts": 0,
+           "db_ok": None, "db_error": "", "same_key": None}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        try:
+            marker = tar.extractfile("GWCONSOLE-BACKUP").read().decode(errors="replace")
+            m = VERSION_RE.search(marker)
+            out["version"] = m.group(1) if m else ""
+            c = re.search(r"^created (.+)$", marker, re.MULTILINE)
+            out["created"] = c.group(1).strip() if c else ""
+            try:
+                out["created_ts"] = int(datetime.strptime(out["created"], "%Y-%m-%d %H:%M:%S %z").timestamp())
+            except ValueError:
+                pass
+        except KeyError:
+            pass
+        if not out["version"]:                       # upgrade backups have no marker: gwconsole-<version>-<time>.tar.gz
+            m = re.match(r"gwconsole-(\d{1,3}\.\d{1,3}\.\d{1,3})-\d{8}-\d{6}\.tar\.gz$", os.path.basename(name or ""))
+            out["version"] = m.group(1) if m else ""
+        key = tar.extractfile("etc/gwconsole/secret.key").read()
+        if current_key is not None:
+            out["same_key"] = hashlib.sha256(key.strip()).digest() == hashlib.sha256(current_key.strip()).digest()
+        if "var/lib/gwconsole/gwconsole.db" in names:
+            with tempfile.TemporaryDirectory() as tmp:
+                p = os.path.join(tmp, "check.db")
+                with open(p, "wb") as f:
+                    f.write(tar.extractfile("var/lib/gwconsole/gwconsole.db").read())
+                try:
+                    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+                    try:
+                        res = con.execute("PRAGMA integrity_check").fetchone()[0]
+                        out["db_ok"] = res == "ok"
+                        out["db_error"] = "" if res == "ok" else str(res)[:200]
+                        out["users"] = [r[0] for r in con.execute("SELECT username FROM users ORDER BY username")]
+                        out["nodes"] = [r[0] for r in con.execute("SELECT name FROM nodes ORDER BY name")]
+                        out["cf_accounts"] = con.execute("SELECT COUNT(*) FROM cf_accounts").fetchone()[0]
+                    finally:
+                        con.close()
+                except sqlite3.Error as e:
+                    out["db_ok"], out["db_error"] = False, str(e)[:200]
+        else:
+            out["db_ok"], out["db_error"] = False, "no database in this backup"
+    return out
+
+
+def verify_file(path: str, cache: dict) -> dict:
+    """Nightly / on-listing check of one backup file, cached by name + size + mtime."""
+    st_ = os.stat(path)
+    k = f"{os.path.basename(path)}:{st_.st_size}:{int(st_.st_mtime)}"
+    if k in cache:
+        return cache[k]
+    try:
+        info = inspect(open_bytes(path), name=path)
+        r = {"ok": bool(info["db_ok"]), "error": info["db_error"], "version": info["version"]}
+    except (OSError, ValueError, tarfile.TarError, KeyError) as e:
+        r = {"ok": False, "error": str(e)[:200], "version": ""}
+    cache[k] = r
+    return r
+
+
+def open_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def summary_json(info: dict) -> str:
+    return json.dumps({k: info.get(k) for k in ("version", "created", "users", "nodes", "cf_accounts", "db_ok")})
