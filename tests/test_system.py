@@ -5,6 +5,7 @@ import io
 import json
 import os
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -30,7 +31,7 @@ def test_backup_roundtrip_and_encryption(tmp_path):
     out = backup.make(str(etc), str(db), str(tmp_path / "audit.log"), "1.3.0", bak=str(tmp_path / "bak"))
     assert os.path.basename(out).startswith("gwconsole-backup-1.3.0-")
     assert [x["kind"] for x in backup.listing(str(tmp_path / "bak"))] == ["backup"]
-    data = open(out, "rb").read()
+    data = Path(out).read_bytes()
     blob = backup.encrypt(data, "correct horse 9")
     assert blob.startswith(backup.MAGIC) and data not in blob
     with pytest.raises(ValueError, match="wrong passphrase"):
@@ -41,6 +42,7 @@ def test_backup_roundtrip_and_encryption(tmp_path):
                           "var/lib/gwconsole/audit.log"}
     con = sqlite3.connect(tmp_path / "restored/var/lib/gwconsole/gwconsole.db")
     assert con.execute("SELECT x FROM t").fetchone() == (42,)
+    con.close()
     with pytest.raises(ValueError):
         backup.encrypt(data, "short")
 
@@ -52,9 +54,11 @@ def _tar(entries):
             info = tarfile.TarInfo(name)
             if kind == "link":
                 info.type, info.linkname = tarfile.SYMTYPE, "/etc/shadow"
+            elif kind == "dir":
+                info.type = tarfile.DIRTYPE
             else:
                 info.size = 1
-            t.addfile(info, io.BytesIO(b"x") if kind != "link" else None)
+            t.addfile(info, io.BytesIO(b"x") if kind == "f" else None)
     return b.getvalue()
 
 
@@ -63,10 +67,40 @@ def _tar(entries):
     [("etc/gwconsole/secret.key", "f"), ("var/lib/gwconsole/../../../root/x", "f")],
     [("etc/gwconsole/secret.key", "f"), ("etc/gwconsole/evil", "link")],
     [("etc/gwconsole/config.yaml", "f")],
+    [("etc/gwconsole/secret.key", "f"), ("etc/gwconsole", "f")],
+    [("etc/gwconsole/secret.key", "f"), ("etc/gwconsole/sub", "link")],
+    [("etc/gwconsole/secret.key", "f"), ("/etc/gwconsole/x", "f")],
+    [("etc/gwconsole/secret.key", "f"), ("etc/gwconsole-evil/x", "f")],
+    [("etc/gwconsole/secret.key", "f"), ("etc/gwconsole/a/../../../root/x", "f")],
 ])
 def test_restore_refuses_anything_unexpected(entries, tmp_path):
     with pytest.raises(ValueError):
         backup.restore(_tar(entries), root=str(tmp_path))
+
+
+def test_upgrade_backups_from_install_sh_are_usable(tmp_path):
+    """install.sh's own backup (tar of both folders, with sub-folders) verifies and restores the top-level files only."""
+    src = tmp_path / "src"
+    (src / "etc/gwconsole").mkdir(parents=True)
+    (src / "var/lib/gwconsole/config-history/.git").mkdir(parents=True)
+    (src / "etc/gwconsole/secret.key").write_bytes(b"k" * 44)
+    (src / "etc/gwconsole/config.yaml").write_text("listen: 127.0.0.1\n")
+    from app.db import DB
+    DB(str(src / "var/lib/gwconsole/gwconsole.db")).close()
+    (src / "var/lib/gwconsole/config-history/.git/HEAD").write_text("ref: refs/heads/main\n")
+    os.symlink("/etc/shadow", src / "var/lib/gwconsole/config-history/link")
+    bak = tmp_path / "gwconsole-1.4.1-20261104-210408.tar.gz"
+    with tarfile.open(bak, "w:gz") as t:
+        t.add(src / "etc/gwconsole", arcname="etc/gwconsole")
+        t.add(src / "var/lib/gwconsole", arcname="var/lib/gwconsole")
+    r = backup.verify_file(str(bak), {})
+    assert r["ok"] and r["version"] == "1.4.1", r
+    (tmp_path / "out/var/lib/gwconsole").mkdir(parents=True)
+    (tmp_path / "out/var/lib/gwconsole/gwconsole.db-wal").write_bytes(b"stale")
+    names = backup.restore(bak.read_bytes(), root=str(tmp_path / "out"))
+    assert sorted(names) == ["etc/gwconsole/config.yaml", "etc/gwconsole/secret.key", "var/lib/gwconsole/gwconsole.db"]
+    assert not (tmp_path / "out/var/lib/gwconsole/gwconsole.db-wal").exists()
+    assert not (tmp_path / "out/var/lib/gwconsole/config-history").exists()
 
 
 def test_helper_request_parsing(tmp_path, monkeypatch):
