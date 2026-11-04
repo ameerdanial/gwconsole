@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- Gateway Console web UI — page shell: login form, sidebar, header and the page container.
+<!-- Gateway Console web UI — page shell: login form, sidebar with the user card and menu, header, the page container and footer.
      Scripts in js/ are loaded in order: core → charts → editor → pages (settings before setup) → app (starts the app). -->
 <html lang="en">
 <head>
@@ -18,11 +18,13 @@
       <div class="err" id="loginErr"></div>
       <button class="btn pri" type="submit">Sign in</button>
     </form>
+    <p class="lfoot" id="loginFoot"></p>
   </div>
 
   <div id="app" class="app hidden">
-    <aside class="side">
+    <aside class="side" id="side">
       <div class="brand">GW<b>//</b>CONSOLE<small>Gateway control</small></div>
+      <button class="hamb" id="hamb" type="button" aria-label="Pages">☰</button>
       <nav class="nav" id="nav">
         <a href="#/overview" data-p="overview">Overview</a>
         <a href="#/monitoring" data-p="monitoring">Monitoring</a>
@@ -33,10 +35,16 @@
         <a href="#/activity" data-p="activity">Activity</a>
         <a href="#/settings" data-p="settings" id="navSettings" class="hidden">Settings</a>
       </nav>
-      <div class="foot">
-        <div>Signed in as <b id="who"></b> <span class="tag" id="whoRole"></span></div>
-        <div class="ver" id="ver"></div>
-        <div class="row" style="margin-top:8px;gap:6px"><button class="btn sm grow" id="account">Password</button><button class="btn sm grow" id="logout">Sign out</button></div>
+      <div class="ucard" id="ucard">
+        <div class="umenu hidden" id="umenu">
+          <div class="h"><b id="umName"></b><span id="umSub"></span></div>
+          <a href="#/account"><i>◉</i>My account</a>
+          <a href="#/account/prefs"><i>⚙</i>Preferences</a>
+          <a href="#/account/sessions"><i>⧉</i>Signed-in browsers</a>
+          <hr><a href="#" id="umNew"><i>✦</i>What's new</a><hr>
+          <a href="#" id="logout" class="signout"><i>⎋</i>Sign out</a>
+        </div>
+        <button id="ubtn" type="button" aria-label="Your account"><span class="av" id="uav"></span><span class="who"><b id="who"></b><span class="rolepill" id="whoRole"></span></span><span class="chev">▾</span></button>
       </div>
     </aside>
     <main class="main">
@@ -52,6 +60,7 @@
         <button class="btn sm" id="refresh">Refresh</button>
       </header>
       <section class="content" id="view"></section>
+      <footer class="pfoot" id="pfoot"></footer>
     </main>
   </div>
 
@@ -67,6 +76,7 @@
   <script src="/static/js/hpform.js"></script>
   <script src="/static/js/alerts.js"></script>
   <script src="/static/js/activity.js"></script>
+  <script src="/static/js/account.js"></script>
   <script src="/static/js/settings.js"></script>
   <script src="/static/js/setup.js"></script>
   <script src="/static/js/app.js"></script>
