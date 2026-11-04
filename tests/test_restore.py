@@ -133,3 +133,22 @@ def test_damaged_newest_backup_raises_an_alert(client, tmp_path, bak):
     a = api_system.backup_alerts()
     assert a and a[0]["kind"] == "backup.broken" and "damaged" in a[0]["msg"]
     assert json.dumps(a)
+
+
+def test_upload_limit_and_who_may_restore(client, tmp_path, bak, monkeypatch):
+    monkeypatch.setattr(backup, "MAX_UPLOAD", 1000)
+    r = client.post("/api/admin/backups/upload", content=b"x" * 1001, headers={**H, "Content-Type": "application/octet-stream"})
+    assert r.status_code == 413
+    spool = os.path.join(os.path.dirname(bak.base.db_path), "restore-spool")
+    assert not [f for f in os.listdir(spool) if f.endswith(".raw")]
+    ok = client.post("/api/admin/backups/upload", content=b"x" * 1000, headers={**H, "Content-Type": "application/octet-stream"})
+    assert ok.status_code == 200 and not ok.json()["encrypted"]
+    # an operator can't upload, preview or restore; signed out gets 401
+    bak.store.create_user("op1", "OpsPass12345", "operator", must_change=False)
+    client.post("/api/logout", headers=H)
+    client.post("/api/login", json={"user": "op1", "password": "OpsPass12345"})
+    assert client.post("/api/admin/backups/upload", content=b"x", headers={**H, "Content-Type": "application/octet-stream"}).status_code == 403
+    assert client.post("/api/admin/backups/restore", json={"name": "x", "password": "OpsPass12345", "confirm": "RESTORE"},
+                       headers=H).status_code == 403
+    client.post("/api/logout", headers=H)
+    assert client.post("/api/admin/backups/upload", content=b"x", headers={**H, "Content-Type": "application/octet-stream"}).status_code == 401
