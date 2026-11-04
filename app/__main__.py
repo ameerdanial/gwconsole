@@ -19,6 +19,10 @@ import getpass
 import sys
 
 
+
+def _n(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
 def _ask_password() -> str:
     from .store import check_password_strength
     if "--password-stdin" in sys.argv:
@@ -191,8 +195,8 @@ async def _check():
     store.import_from_yaml(base)
     s = store.runtime(base)
     pool = SSHPool(s)
-    print(f"config OK — {len(s.haproxy_nodes)} haproxy node(s), {len(s.cloudflared_nodes)} cloudflared node(s), "
-          f"{len(s.cf_accounts)} CF account(s), {len(store.users())} user(s)")
+    print(f"config OK — {_n(len(s.haproxy_nodes), 'haproxy node')}, {_n(len(s.cloudflared_nodes), 'cloudflared node')}, "
+          f"{_n(len(s.cf_accounts), 'CF account')}, {_n(len(store.users()), 'user')}")
     for n in s.haproxy_nodes:
         try:
             r = await pool.run(n, f"{n.haproxy_bin} -v | head -1; command -v socat >/dev/null || echo 'WARN: socat missing'; "
@@ -215,7 +219,7 @@ async def _check():
         try:
             t = await cf.tunnels(a)
             z = await cf.zones(a)
-            print(f"[ok]   CF {a.name}: {len(t)} tunnel(s), {len(z)} zone(s)")
+            print(f"[ok]   CF {a.name}: {_n(len(t), 'tunnel')}, {_n(len(z), 'zone')}")
         except Exception as e:
             print(f"[FAIL] CF {a.name}: {e}")
     await cf.close()
