@@ -278,7 +278,6 @@ def parse_section(kind: str, name: str, body: list[str]) -> Parsed:
         m["log"] = False
     lines = [(i, _strip_comment(l)) for i, l in enumerate(body)]
     toks_at = {i: c[0].split() for i, c in lines}
-    advanced_idx = set()
 
     def own(i, key):
         p.owners[i] = key
@@ -294,7 +293,7 @@ def parse_section(kind: str, name: str, body: list[str]) -> Parsed:
         if len(t) >= 3 and t[0] == "acl":
             acls.setdefault(t[1], {"idx": [], "toks": t[2:]})["idx"].append(i)
     usage = {n: 0 for n in acls}
-    for i, t in toks_at.items():
+    for _i, t in toks_at.items():
         if t and t[0] != "acl":
             for w in t:
                 for n in re.findall(r"!?([A-Za-z0-9_.\-]+)", w):
@@ -348,7 +347,7 @@ def parse_section(kind: str, name: str, body: list[str]) -> Parsed:
             if line == "option redispatch":
                 m["redispatch"] = True; own(i, "redispatch"); continue
             if d == "default-server" and len(t) >= 3 and set(t[1::2]) <= {"inter", "rise", "fall"} and len(t) % 2 == 1:
-                kv = dict(zip(t[1::2], t[2::2]))
+                kv = dict(zip(t[1::2], t[2::2], strict=False))
                 m["check"].update(kv); own(i, "default-server"); continue
             if d == "server":
                 s = _parse_server(t)
@@ -380,7 +379,7 @@ def parse_section(kind: str, name: str, body: list[str]) -> Parsed:
                 m["force_https"] = True; own(i, "https:redirect"); continue
     # rate limit: all three lines or none
     rl = []
-    for k, rx in enumerate(RL_RE):
+    for rx in RL_RE:
         hit = [i for i, t in toks_at.items() if t and rx.match(" ".join(t)) and i not in p.owners]
         rl.append(hit[0] if hit else None)
     if kind == "frontend" and all(x is not None for x in rl):
