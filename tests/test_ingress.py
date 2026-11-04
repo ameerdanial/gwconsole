@@ -1,7 +1,7 @@
 """Tests for adding/removing tunnel hostnames (ingress) and input validation."""
 import pytest
 
-from app.tunnelops import edit_ingress, new_config_text, check_hostname, check_service
+from app.tunnelops import check_hostname, check_service, edit_ingress, new_config_text
 
 INDENTED = """tunnel: 6f1c   # adproject tunnel
 credentials-file: /root/.cloudflared/adproject/x.json
