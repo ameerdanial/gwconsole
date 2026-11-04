@@ -98,6 +98,146 @@ async def update_user(request: Request, uid: int, body: dict = Body(...)):
     return {"ok": True}
 
 
+# ---- scoped access (v1.5) --------------------------------------------------------------
+async def _scope_preview(items: list[dict]) -> dict:
+    """What a scope gives, for the Access dialog's live preview."""
+    from . import sites
+    from .scope import Scope, routes
+    tunnels = {tuple(i["ref"].split("/", 1)) for i in items if i.get("kind") == "tunnel" and "/" in i.get("ref", "")}
+    sc = Scope(all=False, tunnels=tunnels, domains=[i["ref"] for i in items if i.get("kind") == "domain"],
+               backends={tuple(i["ref"].split("/", 1)) for i in items if i.get("kind") == "backend" and "/" in i.get("ref", "")})
+    rt = routes(st.store.db)
+    for r in rt:
+        t = r.get("tunnel") or {}
+        if (t.get("node"), t.get("name")) in tunnels:
+            sc.tunnel_hosts.add(r["host"])
+    hosts = []
+    for r in sorted(rt, key=lambda x: x["host"]):
+        if sc.host_ok(r["host"]):
+            t = r.get("tunnel") or {}
+            via = (f"{t.get('name')} → " if t.get("name") else "") + (f"{r.get('frontend')} → {r.get('backend')}"
+                                                                     if r.get("frontend") else (r.get("service") or "direct"))
+            hosts.append({"host": r["host"], "via": via,
+                          "route_only": bool(t.get("name")) and not sc.tunnel_ok(t.get("node"), t.get("name"))})
+    hp = []
+    for node, m in (await sites.hp_models()).items():
+        v = await sites.hp_view(sc, node, m)
+        if not (v.frontends or v.own_backends or v.shared_backends):
+            continue
+        hp.append({"node": node,
+                   "frontends": [{"name": f, "rules": len(v.own_rules.get(f, ()))} for f in sorted(v.frontends)],
+                   "own": sorted(v.own_backends), "shared": sorted(v.shared_backends)})
+    open_alerts = [a for a in st.store.db.q("SELECT target FROM alerts WHERE resolved_at IS NULL") if sc.text_ok(a["target"])]
+    return {"tunnels": sorted(f"{n}/{t}" for n, t in tunnels), "hosts": hosts, "haproxy": hp,
+            "alerts": len(open_alerts), "checks": sum(1 for r in st.store.db.q("SELECT host FROM checks WHERE excluded=0")
+                                                      if sc.host_ok(r["host"]))}
+
+
+def _guess_zone(host: str) -> str:
+    """example.com, or example.com.my for two-part endings like .com.my / .co.uk (when Cloudflare didn't say)."""
+    p = host.split(".")
+    n = 3 if len(p) >= 3 and len(p[-1]) == 2 and p[-2] in {"com", "net", "org", "gov", "edu", "co", "ac", "mil", "biz"} else 2
+    return ".".join(p[-n:])
+
+
+@router.get("/admin/scope/choices")
+async def scope_choices(request: Request):
+    """Tunnels, domains (from the hostnames the dashboard knows) and HAProxy backends to pick from."""
+    need(request, "superadmin")
+    from . import sites
+    from .scope import HPView, Scope, routes
+    rt = routes(st.store.db)
+    per_tunnel: dict = {}
+    zones: dict = {}
+    known = sorted({r["name"] for r in st.store.db.q("SELECT DISTINCT name FROM traffic_daily WHERE source='cfzone'")},
+                   key=len, reverse=True)          # Cloudflare zone names, longest first
+    for r in rt:
+        t = r.get("tunnel") or {}
+        if t.get("name"):
+            per_tunnel.setdefault(f"{t['node']}/{t['name']}", []).append(r["host"])
+        z = next((k for k in known if r["host"] == k or r["host"].endswith("." + k)), None)
+        zones.setdefault(z or _guess_zone(r["host"]), []).append(r["host"])
+    tunnels, seen = [], set()
+    for n in st.s.cloudflared_nodes:
+        try:
+            ts = await st.inv.tunnels(n)
+        except (NodeError, OSError):
+            ts = []
+        for t in ts:
+            ref = f"{n.name}/{t.name}"
+            seen.add(ref)
+            tunnels.append({"ref": ref, "node": n.name, "name": t.name, "hosts": sorted(per_tunnel.get(ref, []))})
+    for ref, hs in sorted(per_tunnel.items()):    # node not reachable right now: still offer what Monitoring found
+        if ref not in seen:
+            node, name = ref.split("/", 1)
+            tunnels.append({"ref": ref, "node": node, "name": name, "hosts": sorted(hs), "offline": True})
+    backends, seen = [], set()
+    for node, m in (await sites.hp_models()).items():
+        v = HPView(Scope(all=False), node, m, [])
+        for b in m.get("backends") or []:
+            hs = sorted(h for h in v.refs.get(b["name"], set()) if h != "*")
+            seen.add(f"{node}/{b['name']}")
+            backends.append({"ref": f"{node}/{b['name']}", "node": node, "name": b["name"], "hosts": hs,
+                             "default": "*" in v.refs.get(b["name"], set()), "servers": len(b.get("servers") or [])})
+    extra: dict = {}
+    for r in rt:
+        if r.get("hp_node") and r.get("backend") and f"{r['hp_node']}/{r['backend']}" not in seen:
+            extra.setdefault((r["hp_node"], r["backend"]), []).append(r["host"])
+    for (node, name), hs in sorted(extra.items()):
+        backends.append({"ref": f"{node}/{name}", "node": node, "name": name, "hosts": sorted(hs), "default": False,
+                         "servers": None, "offline": True})
+    return {"tunnels": tunnels, "zones": [{"zone": z, "hosts": sorted(h)} for z, h in sorted(zones.items())],
+            "hosts": sorted(r["host"] for r in rt), "backends": backends}
+
+
+@router.get("/admin/users/{uid}/scope")
+async def get_scope(request: Request, uid: int):
+    need(request, "superadmin")
+    u = st.store.user_by_id(uid)
+    if not u:
+        raise KeyError("user not found")
+    items = st.store.scope_items(uid)
+    return {"user": u["username"], "role": u["role"], "mode": u["scope_mode"], "items": items,
+            "preview": await _scope_preview(items) if u["scope_mode"] == "pick" else None}
+
+
+@router.post("/admin/scope/preview")
+async def scope_preview(request: Request, body: dict = Body(...)):
+    need(request, "superadmin")
+    items = [i for i in body.get("items") or [] if isinstance(i, dict)][:200]
+    return await _scope_preview(items)
+
+
+@router.put("/admin/users/{uid}/scope")
+async def set_scope(request: Request, uid: int, body: dict = Body(...)):
+    need(request, "superadmin")
+    from . import scope as scopemod
+    u = st.store.user_by_id(uid)
+    if not u:
+        raise KeyError("user not found")
+    r = st.store.set_scope(uid, str(body.get("mode", "all")), body.get("items") or [])
+    scopemod.forget()
+    fmt = lambda x: "everything" if x["mode"] == "all" else ", ".join(f"{i['kind']}:{i['ref']}" for i in x["items"])
+    audit(request, "user access", u["username"], True, f"{fmt(r['before'])} -> {fmt(r['after'])}"[:1000])
+    return {"ok": True, **r["after"]}
+
+
+@router.post("/admin/users/{uid}/2fa/reset")
+async def reset_2fa(request: Request, uid: int):
+    """For a user who lost their phone: two-step sign-in off; if their role requires it, they set it up again
+    right after their next sign-in. Their browsers are signed out."""
+    need(request, "superadmin")
+    u = st.store.user_by_id(uid)
+    if not u:
+        raise KeyError("user not found")
+    if uid == user(request)["id"]:
+        raise ValueError("reset your own two-step sign-in in My account (or with gwconsole reset-2fa on the host)")
+    st.store.twofa_off(uid)
+    st.store.drop_user_sessions(uid)
+    audit(request, "2fa reset", u["username"], True, "by a superadmin; their browsers were signed out")
+    return {"ok": True}
+
+
 @router.post("/admin/users/{uid}/reset")
 async def reset_user(request: Request, uid: int):
     need(request, "superadmin")
@@ -272,7 +412,7 @@ def _find_node(name: str):
 async def nodes(request: Request):
     need(request, "superadmin")
     try:
-        pub = open(st.s.ssh_key_file + ".pub").read().strip()
+        pub = Path(st.s.ssh_key_file + ".pub").read_text().strip()
     except OSError:
         pub = ""
     return {"items": st.store.node_rows(), "pubkey": pub, "imported": st.store.get("imported_from_yaml")}
@@ -373,7 +513,7 @@ async def node_bootstrap(request: Request, body: dict = Body(...)):
     if not KEY_RE.match(host_key):
         raise ValueError("scan and confirm the host key first")
     try:
-        pub = open(st.s.ssh_key_file + ".pub").read().strip()
+        pub = Path(st.s.ssh_key_file + ".pub").read_text().strip()
     except OSError:
         raise ValueError("this dashboard has no SSH key yet — re-run install.sh")
     pattern = host if port == 22 else f"[{host}]:{port}"
@@ -534,7 +674,7 @@ def setup_pending() -> bool:
 async def setup_get(request: Request):
     need(request, "superadmin")
     try:
-        pub = open(st.s.ssh_key_file + ".pub").read().strip()
+        pub = Path(st.s.ssh_key_file + ".pub").read_text().strip()
     except OSError:
         pub = ""
     n = st.store.notify_cfg()
