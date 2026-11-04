@@ -42,6 +42,64 @@ def forget_models():
     _hp_cache["at"] = 0.0
 
 
+async def hp_view(sc, node: str, model: dict | None = None):
+    """One HAProxy node seen through a user's scoped access (scope.HPView)."""
+    from .scope import HPView, routes
+    if model is None:
+        model = (await hp_models()).get(node) or {"frontends": [], "backends": []}
+    return HPView(sc, node, model, routes(st.store.db))
+
+
+async def prime_scope(sc):
+    """Work out the user's own backends on every HAProxy node, so text targets (alerts, activity) can be matched."""
+    if not sc.all:
+        for node, m in (await hp_models()).items():
+            await hp_view(sc, node, m)
+    return sc
+
+
+async def filter_hp_status(sc, status: dict) -> dict:
+    """Runtime stats of one HAProxy node, cut down to what a scoped user may see; locked backends are marked."""
+    if sc.all or not isinstance(status, dict):
+        return status
+    v = await hp_view(sc, status.get("node", ""))
+    out = dict(status)
+    out["frontends"] = [f for f in status.get("frontends") or [] if f.get("name") in v.frontends]
+    out["backends"] = [{**b, "locked": b.get("name") not in v.own_backends} for b in status.get("backends") or []
+                       if v.backend_visible(b.get("name", ""))]
+    out["scoped"] = True
+    return out
+
+
+def filter_tunnels(sc, data: dict) -> dict:
+    """The CF Tunnels data cut down to a scoped user's tunnels, and their hostnames on other tunnels."""
+    if sc.all:
+        return data
+    nodes = []
+    for n in data.get("nodes", []):
+        ts = []
+        for t in n.get("tunnels", []):
+            hosts = [r.get("hostname") or "" for r in (t.get("config") or {}).get("ingress", [])]
+            if sc.tunnel_ok(n["node"], t["name"]):
+                ts.append({**t, "scope": "full"})
+            elif any(sc.host_ok(h) for h in hosts if h):
+                cfg = dict(t.get("config") or {})
+                cfg["ingress"] = [r for r in cfg.get("ingress", []) if r.get("hostname") and sc.host_ok(r["hostname"])]
+                dns = t.get("dns")
+                if isinstance(dns, dict):
+                    dns = {**dns, "routes": [r for r in dns.get("routes") or [] if sc.host_ok(r.get("hostname", ""))],
+                           "orphans": [r for r in dns.get("orphans") or []
+                                       if sc.host_ok(r if isinstance(r, str) else r.get("hostname", r.get("name", "")))]}
+                week = [0] * len(t.get("requests_week") or [])     # only their hostnames' traffic
+                for r in cfg["ingress"]:
+                    week = [a + b for a, b in zip(week, r.get("week") or [0] * len(week), strict=False)]
+                ts.append({**t, "config": cfg, "dns": dns, "scope": "routes", "requests_week": week,
+                           "requests_today": week[-1] if week else 0, "ready_connections": None})
+        if ts:
+            nodes.append({**n, "tunnels": ts})
+    return {**data, "nodes": nodes, "unmanaged": [], "accounts": {}, "scoped": True}
+
+
 def split_service(service: str) -> tuple[str, str, int | None]:
     """'http://10.0.10.21:8080' → ('http', '10.0.10.21', 8080). Non-network services → (scheme, '', None)."""
     s = (service or "").strip()
