@@ -7,3 +7,4 @@ PyYAML>=6.0
 ruamel.yaml>=0.18
 cryptography>=41
 tzdata>=2024.1        # time zones (e.g. Asia/Kuala_Lumpur) even where the OS has no tz database
+segno>=1.6           # QR code for setting up two-step sign-in (pure Python, no other dependencies)
