@@ -141,6 +141,7 @@ def test_upgrade_from_v140_database(tmp_path):
     con.commit()
     con.close()
     s = Store(DB(p), Vault(str(tmp_path / "k"), create=True))
-    assert s.db.version == len(MIGRATIONS) == 3
+    assert s.db.version == len(MIGRATIONS) == 4
     assert s.db.one("SELECT last_active FROM sessions")["last_active"] == 5
     assert json.loads(s.db.one("SELECT prefs FROM users")["prefs"]) == {}
+    s.db.close()
