@@ -36,7 +36,7 @@ PAGES.alerts = {
     $("#alQ").addEventListener("input", (e) => { f.q = e.target.value; sync(); clearTimeout(t); t = setTimeout(() => refresh(true), 300); });
     $("#alCheck").addEventListener("click", async (e) => {
       busy(e.target, true);
-      try { const r = await api("/api/alerts/check", { body: {} }); toast(`Checked: ${r.active} active, ${r.changes} change(s)`, "ok"); }
+      try { const r = await api("/api/alerts/check", { body: {} }); toast(`Checked: ${r.active} active, ${fmt.plural(r.changes, "change")}`, "ok"); }
       catch (err) { toast(err.message, "bad"); } finally { busy(e.target, false); refresh(true); updateBadge(); }
     });
     $("#alMuteNode").addEventListener("click", () => this.muteNode());
@@ -60,7 +60,7 @@ PAGES.alerts = {
         <td>${pill(a.sev === "crit" ? "crit" : "warn", a.sev === "crit" ? "CRIT" : "WARN")}</td>
         <td class="mono small">${esc(a.where)}</td>
         <td>${esc(a.msg)}${a.flapping ? ` <span class="pill warn" title="Fired ${a.flaps + 1} times within 10 minutes">flapping</span>` : ""}</td>
-        <td class="small" title="${esc(fmt.time(a.first_seen))}">${esc(fmt.short(a.first_seen))}</td>
+        <td class="small nowrap" title="${esc(fmt.time(a.first_seen))}">${esc(fmt.short(a.first_seen))}</td>
         <td class="small">${fmt.dur(a.duration)}</td>
         <td>${a.status === "resolved" ? pill("ok", "resolved") : pill(a.sev === "crit" ? "crit" : "warn", "firing")}
           ${a.acked_by ? `<div class="sub">ack by ${esc(a.acked_by)}</div>` : ""}${a.muted ? `<div class="sub">muted until ${esc(fmt.short(a.muted_until))}</div>` : ""}</td>
