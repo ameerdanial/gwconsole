@@ -1,4 +1,4 @@
-"""SQLite storage for users, sessions, settings, Cloudflare accounts, nodes and alerts.
+"""SQLite storage for users (with preferences), sessions, settings, Cloudflare accounts, nodes, alerts and monitoring.
 
 One file at /var/lib/gwconsole/gwconsole.db (WAL mode). The schema is versioned with
 PRAGMA user_version; MIGRATIONS[i] upgrades version i -> i+1 and runs exactly once.
@@ -154,6 +154,12 @@ MIGRATIONS = [
         result  TEXT NOT NULL,
         seconds INTEGER
     );
+    """,
+    # 2 -> 3 : v1.4.1 — per-user preferences, idle sign-out
+    """
+    ALTER TABLE users ADD COLUMN prefs TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE sessions ADD COLUMN last_active INTEGER;
+    UPDATE sessions SET last_active = last_seen;
     """,
 ]
 
