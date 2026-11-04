@@ -16,7 +16,7 @@ PAGES.traffic = {
         <span class="segs" id="trRange">${[["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["12m", "12 months"]].map(([k, l]) => `<button data-r="${k}">${l}</button>`).join("")}</span>
         <button class="btn sm op" data-act="cfref" title="Fetch the newest numbers from Cloudflare now">Refresh from Cloudflare</button>
         <a class="btn sm" id="trCsv" href="#">Export CSV</a></div>
-      <div id="trBody"><div class="panel"><div class="empty">Loading…</div></div></div>`;
+      <div id="trBody" class="scol"><div class="panel"><div class="empty">Loading…</div></div></div>`;
     v.addEventListener("click", (e) => this.onClick(e));
     this.marks();
   },
@@ -41,13 +41,15 @@ PAGES.traffic = {
   kpi(l, v, d) { return `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="d">${d}</div></div>`; },
   xFmt(l) {
     if (this.range === "today") return l;
-    if (this.range === "12m") return new Date(l + "-01T00:00:00").toLocaleDateString([], { month: "short" });
-    return new Date(l + "T00:00:00").toLocaleDateString([], this.range === "7d" ? { weekday: "short", day: "numeric" } : { day: "numeric", month: "short" });
+    if (this.range === "12m") return fmt._M[+l.slice(5, 7) - 1];
+    const t = new Date(l + "T12:00:00").getTime() / 1000;
+    return this.range === "7d" ? `${+l.slice(8, 10)} ${fmt.wd(t)}` : fmt.date(t, { year: false });
   },
   render(d) {
     const b = $("#trBody");
     const t = this.tab === "cf" ? d.cf : d.hp;
-    const span = `${new Date(d.days[0] + "T00:00:00").toLocaleDateString([], { day: "numeric", month: "short" })} – ${new Date(d.days[1] + "T00:00:00").toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })}`;
+    const dts = (x) => new Date(x + "T12:00:00").getTime() / 1000;
+    const span = d.days[0] === d.days[1] ? `${this.range === "today" ? "Today · " : ""}${fmt.date(dts(d.days[0]))}` : `${fmt.date(dts(d.days[0]))} – ${fmt.date(dts(d.days[1]))}`;
     if (this.tab === "cf") {
       const st = t.status || {};
       const errs = Object.entries(st.errors || {});
