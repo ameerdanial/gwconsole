@@ -4,6 +4,56 @@ All notable changes to Gateway Console. Versions follow [Semantic Versioning](ht
 MAJOR for breaking config/install changes, MINOR for new features, PATCH for fixes.
 
 ## [Unreleased]
+### Added
+- **My account** (click your name at the bottom of the menu), for every role:
+  - your profile;
+  - change your password (optionally keeping your other browsers signed in);
+  - your signed-in browsers, with "Sign out" for one or all others;
+  - **preferences**, saved for your user on every browser: 24-hour or 12-hour clock, date style
+    (4 Nov 2026 / 04/11/2026 / 2026-11-04), time zone, start page, auto-refresh on/off.
+- **Sign me out when I'm away** (15 min / 30 min / 1 h / 4 h / 8 h, or only when the sign-in ends):
+  - you get a one-minute "Stay signed in" warning first;
+  - pages refreshing by themselves don't count as being there;
+  - it's checked on the server too, so a closed tab doesn't stay signed in.
+  - Superadmins can set the longest allowed time for everyone in Settings → Sign-in security.
+- **User card and menu** at the bottom of the sidebar: My account, Preferences, Signed-in browsers,
+  What's new, Sign out.
+- **Footer** on every page and on the sign-in page: version, whether it's up to date, release notes
+  and © ADProject.
+- **Activity search and filters:**
+  - search text, user, result, Today / 7 / 30 days / All, and categories (config changes, server
+    state, tunnels & DNS, monitoring, users & settings, updates & backups, sign-ins);
+  - "Hide sign-ins" is on by default;
+  - rows are grouped by day, with the full output under Details;
+  - "Load 50 more" and CSV export.
+- Settings → Cloudflare token help in the setup wizard lists Zone · Analytics · Read.
+
+### Changed
+- **New Overview:**
+  - Tiles: sites up, servers healthy, backend servers up, tunnels healthy, requests today (vs
+    yesterday) and open alerts.
+  - "Needs attention" shows the 8 most important alerts instead of all of them.
+  - Sites with response times, today's traffic per hour, and server CPU / memory / disk.
+  - Gateways with every HAProxy backend's servers and every tunnel's edge connections.
+- **One date and time format everywhere**, following your preferences.
+- **Phones:**
+  - your initials in the top bar open the same menu (Sign out was missing on phones);
+  - ☰ opens the page list.
+- The version moved from the sidebar to the footer.
+- The Alerts page's "Started" column no longer wraps.
+- Summary tile text wraps instead of being cut off on phones.
+
+### Fixed
+- Overview server squares and the "About HTTPS" box in the HAProxy form were laid out wrongly
+  (style names reused in 1.4.0).
+- **Tunnels whose origin is `localhost`:**
+  - Monitoring now checks them from the cloudflared machine instead of from the dashboard;
+  - they only match an HAProxy frontend on that same machine.
+- Internal site checks use the tunnel rule's "HTTP Host header" when it has one.
+- **Time zones** work on minimal LXC/VM images without the system time-zone database (`tzdata`
+  is now installed with the dashboard). Before, the weekly summary and daily traffic could fall
+  back to UTC.
+- Wording: "1 user / 2 users" instead of "user(s)".
 
 ## [1.4.0] - 2026-11-04
 ### Added
