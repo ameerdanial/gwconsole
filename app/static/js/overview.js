@@ -56,7 +56,7 @@ PAGES.overview = {
     const issue = (s) => s.error ? `${s.name} unreachable` : (s.disk ?? 0) >= st.disk_warn ? `${s.name} disk ${Math.round(s.disk)}%` : `${s.name} memory ${Math.round(s.mem)}%`;
     $("#ovKpi").innerHTML =
       tile(down.length ? "crit" : sites.length && up < sites.length ? "warn" : "", "Sites up", sites.length ? `${up} <small>/ ${sites.length}</small>` : "–",
-        down.length ? `${esc(down[0].host)}${down.length > 1 ? ` + ${down.length - 1} more` : ""} down` : sites.length ? "all answering" : "none found yet", sites.length ? (up / sites.length) * 100 : null, "#/monitoring") +
+        down.length ? (down.length === 1 ? `${esc(down[0].host)} down` : `${down.length} down: ${esc(down.slice(0, 2).map((x) => x.host).join(", "))}${down.length > 2 ? "…" : ""}`) : sites.length ? "all answering" : "none found yet", sites.length ? (up / sites.length) * 100 : null, "#/monitoring") +
       tile(bad.length ? "warn" : "", "Servers healthy", srv.length ? `${srv.length - bad.length} <small>/ ${srv.length}</small>` : "–",
         bad.length ? esc(issue(bad[0])) : srv.length ? "disk and memory OK" : "not read yet", srv.length ? ((srv.length - bad.length) / srv.length) * 100 : null, "#/monitoring") +
       tile(lvl(k.servers_up, k.servers_total), "Backend servers up", `${k.servers_up} <small>/ ${k.servers_total}</small>`,
