@@ -1,4 +1,4 @@
-"""Root-side helper for in-dashboard updates and backups (run by systemd as root, never by the web app).
+"""Root-side helper for in-dashboard updates, backups and restores (run by systemd as root, never by the web app).
 
 The dashboard runs unprivileged, so it can only ask: it writes one short line to
 /var/lib/gwconsole/helper/request and the gwconsole-helper.path unit starts this script.
@@ -6,6 +6,7 @@ Accepted requests (anything else is ignored):
     check by <user>
     upgrade vX.Y.Z by <user>
     backup by <user>
+    restore <backup file name> by <user>     (a file in /var/backups/gwconsole, or an upload in the spool folder)
 Results go to /var/lib/gwconsole-helper/ (root-owned, readable by the gwconsole group):
 status.json (update state, available versions with their changelog) and update.log.
 
@@ -27,6 +28,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 APP = "/opt/gwconsole"
 ETC = "/etc/gwconsole"
@@ -36,7 +38,9 @@ STATUS = f"{STATE}/status.json"
 LOG = f"{STATE}/update.log"
 DB = "/var/lib/gwconsole/gwconsole.db"
 BAK = "/var/backups/gwconsole"
-REQ_RE = re.compile(r"^(check|backup|upgrade (v\d{1,3}\.\d{1,3}\.\d{1,3})) by ([A-Za-z0-9_.@-]{1,48})$")
+REQ_RE = re.compile(r"^(check|backup|upgrade (v\d{1,3}\.\d{1,3}\.\d{1,3})|restore ((?:gwconsole-[A-Za-z0-9.\-]{1,120}|upload-[0-9a-f]{16})\.tar\.gz)) "
+                    r"by ([A-Za-z0-9_.@-]{1,48})$")
+SPOOL = "/var/lib/gwconsole/restore-spool"     # uploads, written by the dashboard user; re-checked here
 GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o ConnectTimeout=15"}
 
 
@@ -128,20 +132,20 @@ def read_request() -> tuple[str, str, str] | None:
     m = REQ_RE.match(data.strip())
     if not m:
         return None
-    action = "upgrade" if m.group(1).startswith("upgrade") else m.group(1)
-    return action, m.group(2) or "", m.group(3)
+    action = m.group(1).split()[0]
+    return action, m.group(2) or m.group(3) or "", m.group(4)
 
 
 def current() -> str:
     try:
-        return "v" + open(f"{APP}/VERSION").read().strip()
+        return "v" + Path(f"{APP}/VERSION").read_text().strip()
     except OSError:
         return "v0.0.0"
 
 
 def source() -> str:
     try:
-        s = open(f"{APP}/SOURCE").read().strip()
+        s = Path(f"{APP}/SOURCE").read_text().strip()
         return s if os.path.isdir(f"{s}/.git") else ""
     except OSError:
         return ""
@@ -198,7 +202,7 @@ def check(by: str = "schedule") -> dict:
 # ---------------------------------------------------------------- upgrade (with automatic rollback)
 def listen_url() -> str:
     try:
-        cfg = open(f"{ETC}/config.yaml").read()
+        cfg = Path(f"{ETC}/config.yaml").read_text()
     except OSError:
         cfg = ""
     lm = re.search(r"^listen:\s*([^\s#]+)", cfg, re.M)
@@ -279,6 +283,45 @@ def upgrade(target: str, by: str):
                     if ok else "The update and the rollback both failed — see the log and run: gwconsole status"))
 
 
+# ---------------------------------------------------------------- restore (requested from Settings → Backups)
+def restore(name: str, by: str):
+    """Restore a listed backup or an uploaded one through `gwconsole restore` (which checks the archive itself,
+    saves the current state first, and puts it back if the restored dashboard doesn't start)."""
+    if load_status().get("restore", {}).get("state") == "running":
+        return
+    folder = SPOOL if name.startswith("upload-") else BAK
+    path = os.path.join(folder, os.path.basename(name))
+    start = int(time.time())
+    try:
+        st_ = os.lstat(path)
+    except OSError:
+        return update(restore={"state": "failed", "name": name, "by": by, "at": start, "message": "backup file not found"})
+    if not stat.S_ISREG(st_.st_mode) or st_.st_size > 200 * 1024 * 1024:
+        return update(restore={"state": "failed", "name": name, "by": by, "at": start, "message": "not a regular file, or too big"})
+    log(f"== {time.strftime('%Y-%m-%d %H:%M:%S')}  restore {name}  (requested by {by})", reset=True)
+    update(restore={"state": "running", "name": name, "by": by, "at": start, "message": "restoring…"})
+    rc = run_logged(["/usr/local/bin/gwconsole", "restore", path, "--by", by])
+    state = {0: "done", 3: "rolled_back"}.get(rc, "failed")
+    msg = {"done": f"Restored {name}", "rolled_back": "The restored dashboard didn't start — the previous state was put back"}.get(
+        state, "The restore didn't run — see the log")
+    update(restore={"state": state, "name": name, "by": by, "at": start, "finished_at": int(time.time()), "message": msg,
+                    "log": tail_log()})
+    record(kind="restore", name=name, by=by, result=state, seconds=int(time.time()) - start)
+    if folder == SPOOL:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def tail_log(n: int = 40) -> str:
+    try:
+        with open(LOG) as f:
+            return "".join(f.readlines()[-n:])[-4000:]
+    except OSError:
+        return ""
+
+
 # ---------------------------------------------------------------- backups (requested or nightly)
 def backup(by: str = "schedule") -> str:
     r = subprocess.run(["/usr/local/bin/gwconsole", "backup", "--quiet"], capture_output=True, text=True, timeout=300)
@@ -313,6 +356,8 @@ def main():
         check(by)
     elif action == "backup":
         backup(by)
+    elif action == "restore":
+        restore(version, by)
     elif action == "upgrade":
         avail = {a["version"] for a in load_status().get("available", [])}
         if version not in avail:
