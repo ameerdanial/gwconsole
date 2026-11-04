@@ -1,4 +1,4 @@
-"""Data access for users, sessions, settings, Cloudflare accounts and nodes,
+"""Data access for users (with preferences), sessions (with idle sign-out), settings, Cloudflare accounts and nodes,
 plus the one-time import from config.yaml and building the runtime Settings."""
 from __future__ import annotations
 
@@ -38,7 +38,19 @@ GENERAL_DEFAULTS = {
     "drift_check": True,           # alert when a config file is changed outside the dashboard
     # v1.4
     "update_notify": True,         # message Telegram/Discord when a new dashboard version is out
+    # v1.4.1
+    "max_idle_minutes": 0,         # longest "sign me out when I'm away" anyone may choose (0 = no limit)
 }
+IDLE_CHOICES = (0, 15, 30, 60, 240, 480)      # minutes; 0 = only when the sign-in itself ends
+PREF_DEFAULTS = {
+    "time24": True,                # 14:05 vs 2:05 PM
+    "date_style": "text",          # text = 4 Nov 2026 · dmy = 04/11/2026 · iso = 2026-11-04
+    "tz": "",                      # IANA time zone; "" = the browser's
+    "start_page": "overview",
+    "auto_refresh": True,
+    "idle_minutes": 0,             # sign me out when I'm away for … (0 = only when the sign-in ends)
+}
+START_PAGES = ("overview", "monitoring", "traffic", "tunnels", "haproxy", "alerts", "activity")
 BOOL_SETTINGS = {"update_check", "auto_update_patch", "nightly_backup", "signin_alerts", "drift_check", "update_notify"}
 MONITOR_DEFAULTS = {               # v1.4: Settings → Monitoring
     "check_every": 60,              # seconds between site checks
@@ -186,27 +198,98 @@ class Store:
     def create_session(self, uid: int, hours: int, ip: str = "", ua: str = "") -> str:
         tok = secrets.token_urlsafe(32)
         t = now()
-        self.db.x("INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_seen, ip, user_agent) "
-                  "VALUES (?,?,?,?,?,?,?)", (_tok_hash(tok), uid, t, t + hours * 3600, t, ip, (ua or "")[:200]))
+        self.db.x("INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_seen, last_active, ip, "
+                  "user_agent) VALUES (?,?,?,?,?,?,?,?)",
+                  (_tok_hash(tok), uid, t, t + hours * 3600, t, t, ip, (ua or "")[:200]))
         return tok
 
-    def session(self, tok: str | None) -> dict | None:
-        """Return the user dict for a valid session (and refresh last_seen at most once a minute)."""
+    # ---------------------------------------------------------------- preferences
+    def prefs(self, uid: int) -> dict:
+        r = self.db.one("SELECT prefs FROM users WHERE id=?", (uid,))
+        p = dict(PREF_DEFAULTS)
+        try:
+            p.update({k: v for k, v in json.loads((r or {}).get("prefs") or "{}").items() if k in PREF_DEFAULTS})
+        except ValueError:
+            pass
+        return p
+
+    def set_prefs(self, uid: int, patch: dict) -> dict:
+        p = self.prefs(uid)
+        for k, v in patch.items():
+            if k not in PREF_DEFAULTS:
+                raise ValueError(f"unknown preference {k}")
+            if k in ("time24", "auto_refresh"):
+                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            elif k == "date_style":
+                if v not in ("text", "dmy", "iso"):
+                    raise ValueError("date style must be text, dmy or iso")
+            elif k == "start_page":
+                if v not in START_PAGES:
+                    raise ValueError("unknown start page")
+            elif k == "idle_minutes":
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    raise ValueError("idle time must be a number of minutes")
+                if v not in IDLE_CHOICES:
+                    raise ValueError("idle time must be one of " + ", ".join(map(str, IDLE_CHOICES)) + " minutes")
+                cap = int(self.general().get("max_idle_minutes") or 0)
+                if cap and (v == 0 or v > cap):
+                    raise ValueError(f"your superadmin allows at most {cap} minutes away")
+            elif k == "tz":
+                v = str(v or "").strip()
+                if v and not re.fullmatch(r"[A-Za-z_]+(/[A-Za-z0-9_+\-]+){0,2}|UTC", v):
+                    raise ValueError("unknown time zone")
+            p[k] = v
+        self.db.x("UPDATE users SET prefs=? WHERE id=?", (json.dumps(p), uid))
+        return p
+
+    def idle_limit(self, uid: int, prefs: dict | None = None) -> int:
+        """Minutes of inactivity after which this user is signed out (0 = only when the sign-in ends).
+        The superadmin's cap always applies, also to users who never chose a value."""
+        mine = int((prefs or self.prefs(uid)).get("idle_minutes") or 0)
+        cap = int(self.general().get("max_idle_minutes") or 0)
+        if cap:
+            return min(mine, cap) if mine else cap
+        return mine
+
+    def session(self, tok: str | None, idle: int | None = None) -> dict | None:
+        """Return the user dict for a valid session, refreshing last_seen at most once a minute.
+        `idle` = seconds since the person last clicked or typed in the browser (X-GWC-Idle header);
+        auto-refresh requests carry it too, so they don't count as being there. When the user's idle
+        limit has passed the session is ended and self.expired_reason says why."""
+        self.expired_reason = ""
         if not tok:
             return None
         h = _tok_hash(tok)
-        r = self.db.one("SELECT s.token_hash, s.expires_at, s.last_seen, u.id, u.username, u.role, u.disabled, "
-                        "u.must_change FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?", (h,))
+        r = self.db.one("SELECT s.token_hash, s.created_at, s.expires_at, s.last_seen, s.last_active, u.id, u.username, "
+                        "u.role, u.disabled, u.must_change, u.prefs FROM sessions s JOIN users u ON u.id = s.user_id "
+                        "WHERE s.token_hash = ?", (h,))
         if not r:
             return None
         t = now()
         if r["expires_at"] < t or r["disabled"]:
             self.db.x("DELETE FROM sessions WHERE token_hash=?", (h,))
             return None
-        if t - r["last_seen"] > 60:
-            self.db.x("UPDATE sessions SET last_seen=? WHERE token_hash=?", (t, h))
+        try:
+            prefs = dict(PREF_DEFAULTS, **{k: v for k, v in json.loads(r["prefs"] or "{}").items() if k in PREF_DEFAULTS})
+        except ValueError:
+            prefs = dict(PREF_DEFAULTS)
+        limit = self.idle_limit(r["id"], prefs)
+        last_active = r["last_active"] or r["last_seen"] or r["created_at"]
+        if limit and t - last_active > limit * 60:
+            self.db.x("DELETE FROM sessions WHERE token_hash=?", (h,))
+            self.expired_reason = f"signed out after {limit} minutes away"
+            return None
+        active = t if idle is None else max(last_active, t - max(0, int(idle)))
+        if t - r["last_seen"] > 60 or active - last_active > 30:
+            self.db.x("UPDATE sessions SET last_seen=?, last_active=? WHERE token_hash=?", (t, active, h))
         return {"id": r["id"], "username": r["username"], "role": r["role"], "must_change": bool(r["must_change"]),
-                "sid": h[:16]}
+                "sid": h[:16], "idle_limit": limit, "prefs": prefs}
+
+    def user_sessions(self, uid: int) -> list[dict]:
+        return self.db.q("SELECT substr(token_hash, 1, 16) AS sid, created_at, expires_at, last_seen, last_active, ip, "
+                         "user_agent FROM sessions WHERE user_id=? AND expires_at > ? ORDER BY last_seen DESC", (uid, now()))
 
     def drop_session(self, tok: str | None):
         if tok:
@@ -266,7 +349,9 @@ class Store:
                 v = normalize_networks(v)
             else:
                 v = int(v)
-                lim = {"session_hours": (1, 720), "alert_interval": (10, 3600),
+                if k == "max_idle_minutes" and v not in IDLE_CHOICES:
+                    raise ValueError("longest idle time must be one of " + ", ".join(map(str, IDLE_CHOICES)) + " minutes")
+                lim = {"session_hours": (1, 720), "alert_interval": (10, 3600), "max_idle_minutes": (0, 480),
                        "alert_retention_days": (1, 3650), "keep_backups": (1, 500)}[k]
                 if not lim[0] <= v <= lim[1]:
                     raise ValueError(f"{k} must be between {lim[0]} and {lim[1]}")
