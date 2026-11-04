@@ -26,14 +26,14 @@ Your name at the bottom of the menu opens **My account**, Preferences, Signed-in
 | Page | See | Do |
 |---|---|---|
 | **Overview** | Tiles for sites, servers, backend servers, tunnels, today's requests and alerts; what needs attention; sites with response times; today's traffic per hour; server CPU / memory / disk; every HAProxy backend's servers and every tunnel's edge connections | — |
-| **Monitoring** | Every public hostname checked every minute, publicly (through Cloudflare) and internally (straight to the origin): status, response time, uptime 24 h / 7 days, certificate expiry. Every server's CPU load, memory, fullest disk, uptime and watched services. Graphs over 1 h – 7 days | **+ Add a check**, per-site options (path, expected status, keyword, slow limit, don't check), watch a service, **Restart** a stopped one, check now |
+| **Monitoring** | Every public hostname checked every minute, publicly (through Cloudflare) and internally (straight to the origin): status, response time, uptime 24 h / 7 days, certificate expiry. Every server's CPU load, memory, fullest disk, uptime and watched services. One graph with tabs (response time, CPU, memory, disk…) over 1 h – 7 days, with a Now / Average / Peak table | **+ Add a check**, per-site options (path, expected status, keyword, slow limit, don't check), watch a service, **Restart** a stopped one, check now |
 | **Traffic** | Per site from Cloudflare: requests, visitors, bandwidth, cache share, 4xx/5xx, threats, countries. Per HAProxy frontend/backend: requests, data, 4xx/5xx, busiest hour. Today / 7 / 30 days / 12 months vs the previous period | Export CSV, refresh from Cloudflare |
 | **CF Tunnels** | Every cloudflared tunnel (auto-discovered) with its edge connections, hostnames and today's requests; a detail panel shows each hostname's full route (cloudflared → HAProxy frontend → backend → servers up), its DNS state and whether the site is up. A **Hostnames** tab lists every public hostname end to end. Tunnels in your accounts that run nowhere you manage | **New tunnel**, **delete tunnel**, **add / remove hostname**, start / stop / restart, logs, test a URL, create/fix DNS route, delete orphan DNS records, **Edit config**, export CSV |
 | **HAProxy** | Six status tiles (service, backends, connections, rates, traffic, version), then every frontend, backend and server with check status, sessions, rates, bytes, 2xx/4xx/5xx | **+ Add** a site or TCP service, **Edit / Delete** any frontend or backend, add/remove servers, server **ready / drain / maint** (kept after a restart), **reload** (config-checked first), restart, logs, **Edit config** |
 | **Alerts** | Active and past alerts: what, when it started, how long it lasted, who acknowledged it | Acknowledge, mute an alert or a whole node, export CSV, check now |
 | **Activity** | Every change (who, what, result, output), grouped by day | Search, filter by user / result / category / time, hide sign-ins, load more, export CSV |
-| **My account** (every role) | Your profile and signed-in browsers | Change password, preferences (clock, date style, time zone, start page, auto-refresh, **sign out when away**), sign out other browsers |
-| **Settings** | Access (users & sessions, sign-in security), Connections (nodes, Cloudflare accounts), Alerts (notifications, monitoring), System (general, backups, config history, about & updates) — superadmin only | Everything that used to be in config files, plus **updating the dashboard**, **backups**, **monitoring thresholds** |
+| **My account** (every role) | Your profile and signed-in browsers | Change password, **two-step sign-in (2FA)**, preferences (clock, date style, time zone, start page, auto-refresh, **sign out when away**), sign out other browsers |
+| **Settings** | Access (users, **what each user can manage**, sessions, sign-in security), Connections (nodes, Cloudflare accounts), Alerts (notifications, monitoring), System (general, backups, config history, about & updates) — superadmin only | Everything that used to be in config files, plus **updating the dashboard**, **backups and restore**, **monitoring thresholds** |
 
 ### Adding sites and editing HAProxy (no config typing)
 **+ Add** on the HAProxy page opens one form for both halves of HAProxy:
@@ -88,8 +88,8 @@ A background checker runs every 30 s (configurable), even with no browser open.
 ![Alerts](docs/alerts.png)
 
 ### My account and signing out when away
-Everyone (viewer, operator, superadmin) has **My account**:
-- change your password;
+Everyone (viewer, operator, superadmin) has **My account**, in three tabs (Profile & password, Preferences, Signed-in browsers):
+- change your password and turn on two-step sign-in;
 - see your signed-in browsers and sign them out;
 - set your preferences: 24-hour or 12-hour clock, date style, time zone, start page and auto-refresh.
 
@@ -114,7 +114,41 @@ In Settings → Sign-in security a superadmin can set the longest time anyone ma
 | Site checks and their options, watched services, restart a stopped watched service | | ✔ | ✔ |
 | Users, Cloudflare accounts, nodes, notifications, monitoring thresholds, settings | | | ✔ |
 
-New users and password resets get a temporary password that must be changed at first sign-in. Superadmins can see every signed-in session and revoke it. The last active superadmin can't be demoted, disabled or deleted.
+New users and password resets get a temporary password that must be changed at first sign-in. Superadmins can see every signed-in session (grouped by user) and revoke it. The last active superadmin can't be demoted, disabled or deleted.
+
+### What each user can manage (scoped access)
+By default a viewer or operator can work on everything their role allows. **Settings → Users → Access…** limits a user to **only what you pick**:
+
+- **Tunnels**: full control of that tunnel (start/stop/restart, logs, its hostnames and its config);
+- **Domains**: `shop.example.com`, or `*.example.com` for everything below it (not `example.com` itself), wherever they are: tunnel routes, DNS records, HAProxy host rules and the backends only those hosts use;
+- **Extra HAProxy backends** that no hostname points to (e.g. a TCP service).
+
+A live preview shows exactly which hostnames, HAProxy rules and backends the user gets. Anything outside it is hidden on every page (Overview, HAProxy, CF Tunnels, Monitoring, Traffic, Alerts, Activity), and a banner tells the user what they can manage.
+
+| | Limited user | Manages everything |
+|---|---|---|
+| Their own host rules on an HAProxy frontend ("Edit my rules") | ✔ | ✔ |
+| Their backends' servers (ready / drain / maint) and settings | ✔ | ✔ |
+| A backend other sites also use | 🔒 read only | ✔ |
+| Add / remove hostnames on a tunnel | on their tunnels, for their domains | ✔ |
+| Restart a tunnel, read its logs | only with the whole tunnel | ✔ |
+| Reload / restart HAProxy, HAProxy logs, edit the raw HAProxy config, create / delete tunnels | | ✔ |
+
+The role still decides *what kind* of change is allowed (a limited viewer only sees). Every refused action is written to Activity as **denied**. Superadmins always manage everything. Changes take effect on the user's next click.
+
+![Access for a user](docs/access.png)
+
+![HAProxy for a user with limited access](docs/scoped-haproxy.png)
+
+### Two-step sign-in (2FA)
+**My account → Turn on two-step sign-in**: scan the QR code with any authenticator app (Google or Microsoft Authenticator, 1Password, Aegis…), type the 6-digit code, and save the **10 recovery codes** (Download or Copy; each works once). At sign-in you then type the code from the app; tick **Remember this browser for 30 days** to skip it on that browser.
+
+- 5 wrong codes lock the code step for 5 minutes. Each code works only once.
+- Turning it off needs your password and a code.
+- **Settings → Sign-in security → Require two-step sign-in for**: nobody, superadmins (the default on new installs) or everyone. Someone who needs it is asked to set it up right after signing in. Installs upgraded from 1.4 start at "nobody".
+- Lost phone? A superadmin uses **Reset 2FA** in Settings → Users, or on the host `gwconsole reset-2fa <user>`.
+
+![Two-step sign-in](docs/twofa.png)
 
 ### Monitoring
 ![Monitoring](docs/monitoring.png)
@@ -157,12 +191,15 @@ On the HAProxy page, **drain** and **maint** are also written into `haproxy.cfg`
 ### Updates, backups and config history
 - **Update from the dashboard** (Settings → About & updates): a nightly check (or **Check now**) shows the new version's notes and the steps an update takes. **Update now** backs up, installs, restarts and checks that the new version answers; if it doesn't, it **goes back to the previous version automatically**. Telegram/Discord tell you when a new version is out. You can let bug-fix releases (x.y.**Z**) install themselves.
 - **What's new**: after an update everyone sees a one-time banner with the changes. **Version history** lists every release with its notes, and **Update history** every upgrade on this dashboard (who, how long, rolled back or not).
-- **Backups** (Settings → Backups): every night (the last 14 are kept) and before every update — settings, keys, users, nodes, accounts and alerts. Optionally copied to one of your nodes over SSH. **Download** gives a passphrase-encrypted file. Restore with `gwconsole restore <file>`.
+- **Backups** (Settings → Backups): every night (the last 14 are kept) and before every update — settings, keys, users, nodes, accounts and alerts. Optionally copied to one of your nodes over SSH. **Download** gives a passphrase-encrypted file. Every backup is checked (opened and its database tested): **Made by** shows the version and **Check** shows verified or damaged; a damaged newest backup raises an alert.
+- **Restore** (Settings → Backups): **Restore…** on any backup in the list, or drop a file (`.gwcbak` with its passphrase, or `.tar.gz`, up to 200 MB) from this or another Gateway Console. You see what's inside and what will be lost, then confirm with your password, your 2FA code and by typing RESTORE. The current state is saved first; the root helper checks the file again, restores it and starts the dashboard. If it doesn't answer within 60 s, the saved state is put back automatically. Everyone signs in again afterwards. A backup from a newer version is refused; a backup from another dashboard carries its own `secret.key`, so 2FA and saved tokens keep working only with that key. From the shell: `gwconsole restore <file>`.
 - **Config history** (Settings → Config history): every change to `haproxy.cfg` and tunnel configs is also committed to a local git history, with who made it. If someone edits a file **outside the dashboard** (over SSH), you get an alert within 15 minutes; it's recorded in the history and you **Accept change** on the Alerts page.
 - **Node software**: cloudflared on each node against the latest Cloudflare release, HAProxy against your OS packages. **Update cloudflared** restarts the tunnels one at a time and goes back to the old version if a tunnel doesn't come back.
 - **Sign-in security**: a message when someone signs in from a new address or an address gets locked out, and an optional list of networks allowed to sign in.
 
 ![About & updates](docs/about-updates.png)
+
+![Restore](docs/restore.png)
 
 ## Install
 
@@ -184,7 +221,7 @@ Host github-gwconsole
   IdentitiesOnly yes
 EOF
 git clone github-gwconsole:ameerdanial/gwconsole.git /root/gwconsole
-cd /root/gwconsole && git checkout v1.4.1      # a tagged release
+cd /root/gwconsole && git checkout v1.5.0      # a tagged release
 ```
 
 ### 2. Run the installer
@@ -264,6 +301,8 @@ By hand it's the same: `cd /root/gwconsole && git fetch --tags --force && git ch
 
 **From 1.1 to 1.2**: nothing to do by hand. On first start, the users, nodes and Cloudflare accounts in your old `config.yaml` (and tokens from `/etc/gwconsole/env`) are imported into the database once. You sign in with the same password. From then on, manage them in Settings; the old sections in `config.yaml` are ignored but left in place.
 
+**Going back from 1.5 to an older version** is refused while users with limited access exist, because the older version would give them everything. Set them to "Everything" first, or use `gwconsole upgrade v1.4.1 --force`.
+
 **Rolling back**: `gwconsole upgrade v1.1.0` (or `git checkout v1.1.0 && bash install.sh`) works, because 1.1 still reads `config.yaml` (changes you made in the 1.2 Settings page are not carried back).
 
 ## Day-to-day
@@ -273,10 +312,12 @@ gwconsole status                # version, service state and the URL to open
 gwconsole version               # installed version, e.g. "gwconsole 1.3.0 (v1.3.0)"
 gwconsole users                 # list users and roles
 gwconsole reset-password ameer  # locked out? set a new password (also re-enables the account)
+gwconsole reset-2fa ameer       # lost the phone? turn off two-step sign-in for that user
 gwconsole create-admin <user>   # add another superadmin from the shell
 gwconsole check                 # test SSH to every node and every Cloudflare token
 gwconsole backup                # back up now (also nightly, automatically)
-gwconsole restore <file>        # put a backup back; asks for the passphrase of a downloaded .gwcbak
+gwconsole restore <file>        # put a backup back (saves the current state first, rolls back if it doesn't start)
+gwconsole upgrade vX.Y.Z --force  # skip the downgrade check
 gwconsole allow-all             # locked out by "allowed networks"? remove the restriction
 gwconsole logs | restart
 ```
@@ -292,6 +333,7 @@ Where things live:
 | Audit log | `/var/lib/gwconsole/audit.log` |
 | Config backups on the nodes | `/etc/haproxy/gwc-backups/`, `/root/.cloudflared/<tunnel>/gwc-backups/` |
 | Dashboard backups (nightly, before updates/restores) | `/var/backups/gwconsole/` |
+| Uploaded backups waiting to be restored (deleted after 1 h) | `/var/lib/gwconsole/restore-spool/` |
 | Config history (git) | `/var/lib/gwconsole/config-history/` — `git log -p` works there |
 | Update helper state, log and update history | `/var/lib/gwconsole-helper/` (written by root, read by the dashboard) |
 | Monitoring history and traffic numbers | in the database (tables `samples`, `samples_15m`, `traffic_daily`); retention in Settings → Monitoring |
@@ -301,7 +343,7 @@ Where things live:
 - `main` holds the latest code. Every release is an annotated tag `vX.Y.Z` ([SemVer](https://semver.org/)); `VERSION` holds the current number, shown in the UI and by `gwconsole version`.
 - Every commit touches one file and its message says what the file is for (`path: description`), so GitHub's file list doubles as documentation.
 - `CHANGELOG.md` records what changed in each release. Add notes under **Unreleased** as you work.
-- **CI** (GitHub Actions) runs on every push and PR: pytest on Python 3.11/3.12/3.13, a compile check, and syntax checks for the shell scripts and every JS file.
+- **CI** (GitHub Actions) runs on every push and PR: pytest on Python 3.11/3.12/3.13 (with a real `haproxy -c`), ruff, pip-audit, a compile check, and syntax checks for the shell scripts and every JS file.
 - **Cutting a release:**
   ```bash
   ./release.sh 1.3.0           # dates the changelog, bumps VERSION, tags v1.3.0
@@ -316,12 +358,13 @@ Where things live:
 ## Security notes
 - This tool can reload and restart your gateways. Only expose it on the management VLAN or Tailscale, never publicly.
 - Passwords are scrypt-hashed. Sessions are stored hashed in the database and survive restarts. 5 failed logins per IP lock that IP out for 5 minutes. Cookies are `HttpOnly` + `SameSite=Strict`, and every change also needs an `X-GWC` header.
-- Roles are enforced on the server for every request; hiding buttons in the UI is only a convenience.
+- Roles are enforced on the server for every request; hiding buttons in the UI is only a convenience. So is scoped access: every API call is checked against what the user can manage, and an HAProxy change by a limited user is compared before and after, refusing anything that touches another site's rules or a shared backend. Refusals are audited as "denied".
+- Two-step sign-in uses standard TOTP codes (RFC 6238). The secret is encrypted with `secret.key`, recovery codes are stored as scrypt hashes, each code works once, and wrong codes are rate-limited per user. Remembered browsers are stored hashed and forgotten when the password changes.
 - The SSH key works only from the dashboard IP (`from=` in authorized_keys). Nodes added in Settings pin their host key; a changed key blocks the connection.
 - "Use the node's password once" sends the password only over that pinned-host-key SSH session and keeps it in memory for that one request: it's never written to the database, logs or audit trail. A sudo password goes to `sudo` on stdin, never on a command line.
 - `/prepare-node.sh` and `/api/health` are the only addresses served without a login; neither holds anything secret (the public key is passed as an argument).
 - Cloudflare tokens, the Telegram bot token and the Discord webhook are encrypted in the database with `secret.key` (root:gwconsole 640). The app runs as the unprivileged `gwconsole` user in a hardened systemd unit.
-- Updating needs root, so the app can only *ask*: it writes one line (`check`, `upgrade vX.Y.Z` or `backup`, plus who asked) that the root helper validates against a fixed pattern, and it only installs version tags that exist in your repository. Nothing else the app writes is ever run as root.
+- Updating and restoring need root, so the app can only *ask*: it writes one line (`check`, `upgrade vX.Y.Z`, `backup` or `restore <backup file name>`, plus who asked) that the root helper validates against a fixed pattern, and it only installs version tags that exist in your repository. A restore only takes a file name from the backup folder or the upload spool, and the helper checks the archive again itself (only the expected regular files, no links or `..`). Nothing else the app writes is ever run as root.
 - **Allowed networks** (Settings → General) limits sign-in and every API call to the networks you list; the form refuses a list that would lock you out, and `gwconsole allow-all` on the host resets it.
 - Downloaded backups are encrypted (scrypt + AES-256-GCM) with a passphrase you choose; they contain `secret.key`.
 
