@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import logging
 import re
+import secrets
 import shlex
 import time
 from contextlib import asynccontextmanager
@@ -15,34 +16,56 @@ from pathlib import Path
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, cloudflared, configops, haproxy, history, hpcfg, sites, tunnelops
+from . import (
+    __version__,
+    cloudflared,
+    configops,
+    haproxy,
+    history,
+    hpcfg,
+    sites,
+    tunnelops,
+)
 from .alerts import Engine
-from .api_admin import router as admin_router
-from .api_alerts import active_alerts, router as alerts_router
-from .api_haproxy import router as haproxy_router
 from .api_account import router as account_router
-from .api_monitor import enrich_tunnels, router as monitor_router
-from .api_system import record_running_version, router as system_router, whatsnew_pending
+from .api_admin import router as admin_router
+from .api_alerts import active_alerts
+from .api_alerts import router as alerts_router
+from .api_haproxy import router as haproxy_router
+from .api_monitor import enrich_tunnels
+from .api_monitor import router as monitor_router
+from .api_system import record_running_version, whatsnew_pending
+from .api_system import router as system_router
 from .audit import Audit
 from .auth import Sessions
 from .cfapi import CFError, Cloudflare
-from .collect import build_alerts, collect_all, kpis, resolve_edge, tunnel_ref, tunnels_full
+from .collect import (
+    build_alerts,
+    collect_all,
+    kpis,
+    resolve_edge,
+    tunnel_ref,
+    tunnels_full,
+)
 from .config import load
 from .db import DB
 from .inventory import Inventory
 from .monitor import Monitor
+from .scope import ScopeError
 from .sshpool import NodeError, SSHPool
-from .state import COOKIE, audit, ip, need, shielded, st, user
+from .state import COOKIE, audit, ip, need, scope, shielded, st, user
 from .store import Store, ip_allowed
 from .vault import Vault, VaultError
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger("gwconsole")
-OPEN_PATHS = {"/api/login", "/api/health"}
+OPEN_PATHS = {"/api/login", "/api/login/2fa", "/api/health"}
 MUST_CHANGE_OK = {"/api/me", "/api/account/password", "/api/logout"}
+# a user who has to turn on two-step sign-in (policy) can only do that until it's on
+MUST_2FA_OK = {"/api/me", "/api/logout", "/api/account", "/api/account/2fa/start", "/api/account/2fa/confirm"}
 
 
 @asynccontextmanager
@@ -105,16 +128,21 @@ async def guard(request: Request, call_next):
         if not u:
             why = st.store.expired_reason
             if why:
-                st.audit.log("?", "signed out (idle)", "-", True, why, ip(request))
+                st.audit.log(st.store.expired_user or "?", "signed out (idle)", st.store.expired_user or "-", True, why, ip(request))
+            if p == "/api/me" and request.headers.get("x-gwc-probe") == "1":   # the page asking "am I signed in?"
+                return JSONResponse({"signed_in": False, "error": why, "idle": bool(why)})
             return JSONResponse({"error": why or "not logged in", "idle": bool(why)}, status_code=401)
         if request.method != "GET" and request.headers.get("x-gwc") != "1":
             return JSONResponse({"error": "missing X-GWC header"}, status_code=403)
         if u["must_change"] and p not in MUST_CHANGE_OK:
             return JSONResponse({"error": "change your password first", "must_change": True}, status_code=403)
+        if u.get("must_setup_2fa") and not u["must_change"] and p not in MUST_2FA_OK:
+            return JSONResponse({"error": "turn on two-step sign-in first", "must_setup_2fa": True}, status_code=403)
         request.state.user = u
         history.ACTOR.set(u["username"])
     resp = await call_next(request)
     resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-GWC-Version"] = __version__        # open tabs notice an update and reload
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "same-origin"
@@ -123,7 +151,9 @@ async def guard(request: Request, call_next):
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC / "index.html")
+    # the page carries the version it was served by, so an open tab can tell when the server was updated
+    html = (STATIC / "index.html").read_text().replace("__GWC_VERSION__", __version__)
+    return HTMLResponse(html)
 
 
 @app.get("/prepare-node.sh")
@@ -138,6 +168,34 @@ async def prepare_script():
 async def health():
     """Unauthenticated liveness probe (install.sh waits on it). Says nothing about nodes."""
     return {"ok": True, "version": __version__}
+
+
+TRUST_COOKIE = "gwc_2fa"           # "remember this browser for 30 days" after two-step sign-in
+_tickets: dict[str, dict] = {}     # password OK, waiting for the code: ticket → {uid, ip, ua, exp}
+_code_fails: dict[int, list[float]] = {}
+
+
+def _code_locked(uid: int) -> bool:
+    t = time.time()
+    _code_fails[uid] = [x for x in _code_fails.get(uid, []) if t - x < 300]
+    return len(_code_fails[uid]) >= 5
+
+
+def _start_session(request: Request, u: dict, addr: str, how: str = "") -> JSONResponse:
+    g = st.store.general()
+    seen = st.store.get(f"seen_ips:{u['username']}", []) or []
+    if addr not in seen:
+        if seen and g.get("signin_alerts", True):
+            ua = request.headers.get("user-agent", "")[:80]
+            asyncio.ensure_future(st.engine.announce(f"New sign-in: {u['username']} from {addr}, an address not used before ({ua})."))
+        st.store.put(f"seen_ips:{u['username']}", ([addr] + seen)[:20])
+    tok = st.store.create_session(u["id"], st.s.session_hours, addr, request.headers.get("user-agent", ""))
+    st.store.touch_login(u["id"])
+    st.audit.log(u["username"], "login", "-", True, how, addr)
+    resp = JSONResponse({"user": u["username"], "role": u["role"], "must_change": bool(u["must_change"])})
+    resp.set_cookie(COOKIE, tok, httponly=True, samesite="strict", max_age=st.s.session_hours * 3600,
+                    secure=request.url.scheme == "https")
+    return resp
 
 
 @app.post("/api/login")
@@ -159,18 +217,52 @@ async def login(request: Request, body: dict = Body(...)):
             asyncio.ensure_future(st.engine.announce(
                 f"Sign-in blocked: too many failed attempts from {addr} (last tried user '{name[:40]}'). That address is locked out for 5 minutes."))
         return JSONResponse({"error": "invalid credentials"}, status_code=401)
-    seen = st.store.get(f"seen_ips:{u['username']}", []) or []
-    if addr not in seen:
-        if seen and g.get("signin_alerts", True):
-            ua = request.headers.get("user-agent", "")[:80]
-            asyncio.ensure_future(st.engine.announce(f"New sign-in: {u['username']} from {addr}, an address not used before ({ua})."))
-        st.store.put(f"seen_ips:{u['username']}", ([addr] + seen)[:20])
-    tok = st.store.create_session(u["id"], st.s.session_hours, addr, request.headers.get("user-agent", ""))
-    st.store.touch_login(u["id"])
-    st.audit.log(u["username"], "login", "-", True, "", addr)
-    resp = JSONResponse({"user": u["username"], "role": u["role"], "must_change": bool(u["must_change"])})
-    resp.set_cookie(COOKIE, tok, httponly=True, samesite="strict", max_age=st.s.session_hours * 3600,
-                    secure=request.url.scheme == "https")
+    if u["totp_on"] and not st.store.trusted(u["id"], request.cookies.get(TRUST_COOKIE)):
+        # step two: the code from the authenticator app (or a recovery code)
+        t = time.time()
+        for k in [k for k, v in _tickets.items() if v["exp"] < t]:
+            _tickets.pop(k, None)
+        ticket = secrets.token_urlsafe(24)
+        _tickets[ticket] = {"uid": u["id"], "ip": addr, "ua": request.headers.get("user-agent", ""), "exp": t + 300}
+        return JSONResponse({"twofa": True, "ticket": ticket, "user": u["username"]})
+    return _start_session(request, u, addr, "remembered browser" if u["totp_on"] else "")
+
+
+@app.post("/api/login/2fa")
+async def login_2fa(request: Request, body: dict = Body(...)):
+    """Second step of signing in: a 6-digit code (or a recovery code) for the ticket from /api/login."""
+    addr = ip(request)
+    if st.logins.locked(addr):
+        return JSONResponse({"error": "too many attempts, wait 5 minutes"}, status_code=429)
+    tk = _tickets.get(str(body.get("ticket", "")))
+    if not tk or tk["exp"] < time.time() or tk["ip"] != addr or tk["ua"] != request.headers.get("user-agent", ""):
+        return JSONResponse({"error": "that sign-in has expired — enter your password again", "restart": True}, status_code=401)
+    u = st.store.user_by_id(tk["uid"])
+    if not u or u["disabled"]:
+        _tickets.pop(str(body.get("ticket")), None)
+        return JSONResponse({"error": "invalid credentials", "restart": True}, status_code=401)
+    if _code_locked(u["id"]):
+        return JSONResponse({"error": "too many wrong codes — wait 5 minutes"}, status_code=429)
+    how = st.store.twofa_check(u["id"], code=str(body.get("code") or ""), recovery=str(body.get("recovery") or ""))
+    if not how:
+        _code_fails.setdefault(u["id"], []).append(time.time())
+        st.logins.fail(addr)
+        await asyncio.sleep(1)
+        st.audit.log(u["username"], "login", "-", False, "wrong two-step code", addr)
+        if _code_locked(u["id"]) and st.store.general().get("signin_alerts", True):
+            asyncio.ensure_future(st.engine.announce(
+                f"Two-step sign-in blocked for {u['username']}: 5 wrong codes from {addr}. Locked for 5 minutes."))
+        return JSONResponse({"error": "that code doesn't match", "twofa": True}, status_code=401)
+    _tickets.pop(str(body.get("ticket")), None)
+    _code_fails.pop(u["id"], None)
+    resp = _start_session(request, u, addr, "two-step: recovery code" if how == "recovery" else "two-step")
+    if how == "recovery":
+        left = st.store.twofa_status(u["id"])["recovery_left"]
+        st.audit.log(u["username"], "2fa recovery code used", u["username"], True, f"{left} left", addr)
+    if body.get("remember"):
+        tok = st.store.trust_browser(u["id"], 30, addr, request.headers.get("user-agent", ""))
+        resp.set_cookie(TRUST_COOKIE, tok, httponly=True, samesite="strict", max_age=30 * 86400,
+                        secure=request.url.scheme == "https")
     return resp
 
 
@@ -186,13 +278,17 @@ async def logout(request: Request):
 async def me(request: Request):
     u = user(request)
     from .api_admin import setup_pending
-    return {"user": u["username"], "role": u["role"], "must_change": u["must_change"], "version": __version__,
+    return {"signed_in": True, "user": u["username"], "role": u["role"], "must_change": u["must_change"], "version": __version__,
+            "must_setup_2fa": bool(u.get("must_setup_2fa")), "totp_on": bool(u.get("totp_on")),
+            "scope": scope(request).summary,
             "setup": u["role"] == "superadmin" and setup_pending(), "updated": whatsnew_pending(u["username"]),
             "prefs": u.get("prefs") or {}, "idle_limit": u.get("idle_limit", 0)}
 
 
 @app.get("/api/inventory")
-async def inventory():
+async def inventory(request: Request):
+    sc = scope(request)
+
     async def node(n):
         try:
             ts = await st.inv.tunnels(n)
@@ -201,29 +297,55 @@ async def inventory():
         return {"name": n.name, "host": n.host, "site": n.site, "base_dir": n.tunnel_base_dir,
                 "tunnels": [{"name": t.name, "unit": t.unit, "config_path": t.config_path,
                              "remote": t.remote} for t in ts]}
-    return {
+    out = {
         "haproxy": [{"name": n.name, "host": n.host, "site": n.site, "config_path": n.config_path}
                     for n in st.s.haproxy_nodes],
         "cloudflared": await asyncio.gather(*(node(n) for n in st.s.cloudflared_nodes)),
         "cf_accounts": list(st.s.cf_accounts),
     }
+    if not sc.all:                             # scoped access: only their tunnels and the HAProxy nodes they use
+        from .scope import routes
+        rt = routes(st.store.db)
+        hosts = {}
+        for r in rt:
+            t = r.get("tunnel") or {}
+            hosts.setdefault((t.get("node"), t.get("name")), []).append(r["host"])
+        for c in out["cloudflared"]:
+            c["tunnels"] = [t for t in c["tunnels"] if sc.tunnel_visible(c["name"], t["name"], hosts.get((c["name"], t["name"]), []))]
+        out["cloudflared"] = [c for c in out["cloudflared"] if c["tunnels"]]
+        keep = []
+        for h in out["haproxy"]:
+            v = await sites.hp_view(sc, h["name"])
+            if v.frontends or v.own_backends or v.shared_backends:
+                keep.append(h)
+        out["haproxy"], out["cf_accounts"] = keep, []
+    return out
 
 
 # ---- overview ------------------------------------------------------------------
 @app.get("/api/overview")
-async def overview():
+async def overview(request: Request):
+    sc = scope(request)
     hp, tun = await collect_all()
+    if not sc.all:
+        hp = [await sites.filter_hp_status(sc, h) for h in hp]
+        hp = [h for h in hp if h.get("frontends") or h.get("backends")]
+        tun = sites.filter_tunnels(sc, tun)
     if st.engine.last_run:
         alerts = active_alerts()
     else:  # engine hasn't finished its first round yet: show live evaluation
         alerts = [dict(a, id=None, acked_by=None, muted=False) for a in build_alerts(hp, tun, bool(st.s.cf_accounts))[0]]
     from .api_monitor import overview_extra
-    return {"kpi": kpis(hp, tun), "alerts": alerts, "haproxy": hp, "tunnels": tun, **(await overview_extra())}
+    if not sc.all:
+        await sites.prime_scope(sc)
+        alerts = [a for a in alerts if sc.text_ok(a.get("where", ""))]
+    return {"kpi": kpis(hp, tun), "alerts": alerts, "haproxy": hp, "tunnels": tun, **(await overview_extra(sc)),
+            "scope": sc.summary}
 
 
 # ---- HAProxy ----------------------------------------------------------------
 @app.get("/api/haproxy/{node}")
-async def hp_status(node: str):
+async def hp_status(request: Request, node: str):
     n = st.s.haproxy(node)
     out, text = await asyncio.gather(haproxy.status(st.pool, n),
                                      configops.read_file(st.pool, n, n.config_path), return_exceptions=True)
@@ -236,7 +358,7 @@ async def hp_status(node: str):
             for s in be["servers"]:
                 f = flags.get(f"{be['name']}/{s['name']}") or {}
                 s["kept"] = "maint" if f.get("disabled") else ("drain" if f.get("weight") == "0" else "")
-    return out
+    return await sites.filter_hp_status(scope(request), out)
 
 
 async def _persist_state(request: Request, n, be: str, srv: str, state: str) -> str:
@@ -279,6 +401,10 @@ async def hp_server(request: Request, node: str, body: dict = Body(...)):
     need(request, "operator")
     n = st.s.haproxy(node)
     be, srv, state = str(body.get("backend")), str(body.get("server")), str(body.get("state"))
+    sc = scope(request)
+    if not sc.all and not (await sites.hp_view(sc, node)).backend_ok(be):
+        from .scope import ScopeError
+        raise ScopeError(f"backend {be} is shared with sites outside your access, or isn't yours")
     keep = body.get("keep", True) is not False
     try:
         msg = await haproxy.set_server_state(st.pool, n, be, srv, state)
@@ -295,6 +421,7 @@ async def hp_server(request: Request, node: str, body: dict = Body(...)):
 @shielded
 async def hp_service(request: Request, node: str, body: dict = Body(...)):
     need(request, "operator")
+    scope(request).need_all("Reloading or restarting HAProxy")
     action = str(body.get("action"))
     r = await haproxy.service_action(st.pool, st.s.haproxy(node), action)
     audit(request, f"haproxy {action}", node, r["ok"], r["output"])
@@ -313,6 +440,7 @@ async def hp_fix_socket(request: Request, node: str):
     """Add (or raise to level admin) the stats socket in haproxy.cfg's global section and install
     socat, using the normal safe apply: validate → backup → write → reload → rollback on failure."""
     need(request, "operator")
+    scope(request).need_all("Changing HAProxy's global settings")
     n = st.s.haproxy(node)
     tg = haproxy.HAProxyConfig(st.pool, st.s, n)
     steps = []
@@ -349,18 +477,20 @@ async def hp_fix_socket(request: Request, node: str):
 
 
 @app.get("/api/haproxy/{node}/logs")
-async def hp_logs(node: str, source: str = "service", lines: int = 200):
+async def hp_logs(request: Request, node: str, source: str = "service", lines: int = 200):
+    scope(request).need_all("Viewing HAProxy's logs (they show every site's traffic)")
     return {"text": await haproxy.logs(st.pool, st.s.haproxy(node), source, lines)}
 
 
 # ---- cloudflared --------------------------------------------------------------
 @app.get("/api/tunnels")
-async def tunnels():
+async def tunnels(request: Request):
+    sc = scope(request)
     data, hp = await asyncio.gather(
         tunnels_full(with_dns=True),
         asyncio.gather(*(haproxy.status(st.pool, n) for n in st.s.haproxy_nodes), return_exceptions=True))
     hp = [h for h in hp if isinstance(h, dict)]
-    return await enrich_tunnels(data, hp)
+    return sites.filter_tunnels(sc, await enrich_tunnels(data, hp))
 
 
 def _lock(node: str) -> asyncio.Lock:
@@ -371,6 +501,7 @@ def _lock(node: str) -> asyncio.Lock:
 @shielded
 async def tun_service(request: Request, node: str, tunnel: str, body: dict = Body(...)):
     need(request, "operator")
+    scope(request).need_tunnel(node, tunnel)
     n, t = await st.inv.get(node, tunnel)
     action = str(body.get("action"))
     r = await cloudflared.service_action(st.pool, n, t, action)
@@ -380,13 +511,18 @@ async def tun_service(request: Request, node: str, tunnel: str, body: dict = Bod
 
 
 @app.get("/api/tunnels/{node}/{tunnel}/logs")
-async def tun_logs(node: str, tunnel: str, lines: int = 200):
+async def tun_logs(request: Request, node: str, tunnel: str, lines: int = 200):
+    scope(request).need_tunnel(node, tunnel)
     n, t = await st.inv.get(node, tunnel)
     return {"text": await cloudflared.logs(st.pool, n, t, lines)}
 
 
 @app.post("/api/tunnels/{node}/{tunnel}/test")
-async def tun_test(node: str, tunnel: str, body: dict = Body(...)):
+async def tun_test(request: Request, node: str, tunnel: str, body: dict = Body(...)):
+    sc = scope(request)
+    if not sc.tunnel_ok(node, tunnel):
+        from urllib.parse import urlsplit
+        sc.need_host(urlsplit(str(body.get("url", ""))).hostname or "")
     n, t = await st.inv.get(node, tunnel)
     return await cloudflared.test_rule(st.pool, n, t, str(body.get("url", "")))
 
@@ -400,8 +536,9 @@ async def _local_tunnel(n, t) -> dict:
 @shielded
 async def tun_dns(request: Request, node: str, tunnel: str, body: dict = Body(...)):
     need(request, "operator")
-    n, t = await st.inv.get(node, tunnel)
     hostname = str(body.get("hostname", "")).strip().lower()
+    scope(request).need_host(hostname)
+    n, t = await st.inv.get(node, tunnel)
     lt = await _local_tunnel(n, t)
     if hostname not in {r["hostname"].lower() for r in lt["config"]["ingress"] if r["hostname"]}:
         raise ValueError(f"{hostname} is not an ingress hostname of {tunnel}")
@@ -421,8 +558,9 @@ async def tun_dns(request: Request, node: str, tunnel: str, body: dict = Body(..
 async def tun_dns_delete(request: Request, node: str, tunnel: str, body: dict = Body(...)):
     """Delete an orphan DNS record: it points at this tunnel but no ingress rule serves it."""
     need(request, "operator")
-    n, t = await st.inv.get(node, tunnel)
     hostname = str(body.get("hostname", "")).strip().lower()
+    scope(request).need_host(hostname)
+    n, t = await st.inv.get(node, tunnel)
     lt = await _local_tunnel(n, t)
     if hostname in {r["hostname"].lower() for r in lt["config"]["ingress"] if r["hostname"]}:
         raise ValueError(f"{hostname} still has an ingress rule — remove the hostname instead")
@@ -445,6 +583,7 @@ async def tun_dns_delete(request: Request, node: str, tunnel: str, body: dict = 
 @shielded
 async def tun_create(request: Request, node: str, body: dict = Body(...)):
     need(request, "operator")
+    scope(request).need_all("Creating tunnels")
     n = st.s.cfd(node)
     name = str(body.get("name", "")).strip().lower()
     if not tunnelops.TUNNEL_NAME_RE.match(name):
@@ -500,6 +639,7 @@ async def tun_create(request: Request, node: str, body: dict = Body(...)):
 @shielded
 async def tun_delete(request: Request, node: str, tunnel: str, body: dict = Body(...)):
     need(request, "operator")
+    scope(request).need_all("Deleting tunnels")
     n, t = await st.inv.get(node, tunnel)
     if str(body.get("confirm", "")) != t.name:
         raise ValueError(f"type the tunnel name ({t.name}) to confirm")
@@ -539,6 +679,7 @@ async def tun_delete(request: Request, node: str, tunnel: str, body: dict = Body
 async def cf_tunnel_delete(request: Request, account: str, tunnel_id: str, body: dict = Body(...)):
     """Delete a Cloudflare tunnel that is not running on any managed node."""
     need(request, "operator")
+    scope(request).need_all("Deleting Cloudflare tunnels")
     acc = st.s.cf_accounts.get(account)
     if not acc:
         raise KeyError(f"unknown account {account}")
@@ -567,9 +708,13 @@ async def cf_tunnel_delete(request: Request, account: str, tunnel_id: str, body:
 @shielded
 async def tun_hostname(request: Request, node: str, tunnel: str, body: dict = Body(...)):
     need(request, "operator")
-    n, t = await st.inv.get(node, tunnel)
     action = str(body.get("action", ""))
     hostname = tunnelops.check_hostname(str(body.get("hostname", "")))
+    sc = scope(request)
+    sc.need_host(hostname)
+    if action == "add":                        # a new hostname only goes onto a tunnel the user has
+        sc.need_tunnel(node, tunnel)
+    n, t = await st.inv.get(node, tunnel)
     tg = cloudflared.TunnelConfig(st.pool, st.s, n, t)
     async with _lock(node):
         cur = await tg.read()
@@ -613,8 +758,19 @@ async def _target(kind: str, ref: str):
     raise KeyError(f"unknown config kind {kind}")
 
 
+def _cfg_scope(request: Request, kind: str, ref: str):
+    """Whole-file editing: HAProxy only for unscoped users; a tunnel's config for users who have that tunnel."""
+    sc = scope(request)
+    if kind == "tunnel":
+        node, _, tun = ref.partition(":")
+        sc.need_tunnel(node, tun)
+    else:
+        sc.need_all("Editing the whole HAProxy config")
+
+
 @app.get("/api/cfg/{kind}/{ref}")
-async def cfg_read(kind: str, ref: str):
+async def cfg_read(request: Request, kind: str, ref: str):
+    _cfg_scope(request, kind, ref)
     tg = await _target(kind, ref)
     content = await tg.read()
     return {"label": tg.label, "path": tg.path, "content": content, "hash": configops.sha(content)}
@@ -623,11 +779,13 @@ async def cfg_read(kind: str, ref: str):
 @app.post("/api/cfg/{kind}/{ref}/validate")
 async def cfg_validate(request: Request, kind: str, ref: str, body: dict = Body(...)):
     need(request, "operator")
+    _cfg_scope(request, kind, ref)
     return await (await _target(kind, ref)).validate(str(body.get("content", "")))
 
 
 @app.post("/api/cfg/{kind}/{ref}/diff")
-async def cfg_diff(kind: str, ref: str, body: dict = Body(...)):
+async def cfg_diff(request: Request, kind: str, ref: str, body: dict = Body(...)):
+    _cfg_scope(request, kind, ref)
     tg = await _target(kind, ref)
     cur = await tg.read()
     content = str(body.get("content", ""))
@@ -641,6 +799,7 @@ async def cfg_diff(kind: str, ref: str, body: dict = Body(...)):
 @shielded
 async def cfg_apply(request: Request, kind: str, ref: str, body: dict = Body(...)):
     need(request, "operator")
+    _cfg_scope(request, kind, ref)
     tg = await _target(kind, ref)
     content = str(body.get("content", ""))
     if not content.endswith("\n"):
@@ -664,8 +823,9 @@ STATS_RE = re.compile(r"'added': (\d+), 'removed': (\d+)")
 
 
 @app.get("/api/cfg/{kind}/{ref}/backups")
-async def cfg_backups(kind: str, ref: str):
+async def cfg_backups(request: Request, kind: str, ref: str):
     """Backups, enriched from the audit log with who made the change that created each one."""
+    _cfg_scope(request, kind, ref)
     items = await (await _target(kind, ref)).backups()
     by_backup = {}
     for a in st.audit.tail(3000):
@@ -681,28 +841,43 @@ async def cfg_backups(kind: str, ref: str):
 
 
 @app.get("/api/cfg/{kind}/{ref}/backups/{name}")
-async def cfg_backup(kind: str, ref: str, name: str):
+async def cfg_backup(request: Request, kind: str, ref: str, name: str):
+    _cfg_scope(request, kind, ref)
     return {"name": name, "content": await (await _target(kind, ref)).read_backup(name)}
 
 
 # ---- activity -------------------------------------------------------------------
+async def _audit_allow(request: Request):
+    """Scoped users see their own entries and entries about their sites, tunnels and backends."""
+    sc = scope(request)
+    if sc.all:
+        return None
+    await sites.prime_scope(sc)
+    me = sc.user
+    return lambda r: r.get("user") == me or sc.text_ok(r.get("target", ""))
+
+
 @app.get("/api/audit")
-async def audit_list(n: int = 0, q: str = "", user: str = "", result: str = "", cat: str = "", since: int = 0,
-                     hide_logins: bool = False, offset: int = 0, limit: int = 50):
+async def audit_list(request: Request, n: int = 0, q: str = "", user: str = "", result: str = "", cat: str = "",
+                     since: int = 0, hide_logins: bool = False, offset: int = 0, limit: int = 50):
     """Activity: newest first, filtered by search text, user, result (ok/failed), category and time."""
+    allow = await _audit_allow(request)
     if n:                                   # v1.4.0 clients
-        return {"items": st.audit.tail(max(1, min(n, 2000)))}
+        return {"items": [r for r in st.audit.tail(max(1, min(n, 2000))) if not allow or allow(r)]}
     return await asyncio.to_thread(st.audit.search, q=q, user=user, result=result, cat=cat, since=since,
-                                   hide_logins=hide_logins, offset=max(0, offset), limit=max(1, min(limit, 500)))
+                                   hide_logins=hide_logins, offset=max(0, offset), limit=max(1, min(limit, 500)),
+                                   allow=allow)
 
 
 @app.get("/api/audit.csv")
-async def audit_csv(q: str = "", user: str = "", result: str = "", cat: str = "", since: int = 0, hide_logins: bool = False):
+async def audit_csv(request: Request, q: str = "", user: str = "", result: str = "", cat: str = "", since: int = 0,
+                    hide_logins: bool = False):
     import csv
     import io
+
     from fastapi.responses import Response
     r = await asyncio.to_thread(st.audit.search, q=q, user=user, result=result, cat=cat, since=since,
-                                hide_logins=hide_logins, offset=0, limit=100000)
+                                hide_logins=hide_logins, offset=0, limit=100000, allow=await _audit_allow(request))
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["time_utc", "user", "category", "action", "target", "result", "from", "detail"])
@@ -716,6 +891,12 @@ async def audit_csv(q: str = "", user: str = "", result: str = "", cat: str = ""
 
 @app.exception_handler(HTTPException)
 async def http_exc(request, exc):
+    if isinstance(exc, ScopeError):           # refused because it's outside the user's scoped access
+        try:
+            audit(request, "denied", request.url.path, False, str(exc.detail))
+        except Exception:                     # noqa: BLE001 — never let the audit log break the answer
+            pass
+        return JSONResponse({"error": exc.detail, "scope": True}, status_code=403)
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
