@@ -5,7 +5,9 @@ environment, so the IPs and names are examples.
 
 | File | Shows |
 |---|---|
-| `overview.png` | Overview page |
+| `overview.png` | Overview page: tiles, needs attention, sites, traffic today, servers, gateways |
+| `account.png` | My account with the user menu open: password, preferences, signed-in browsers |
+| `activity.png` | Activity with search, filters and categories |
 | `haproxy.png` | HAProxy page with the status tiles and Edit / Delete / + server |
 | `monitoring.png` | Monitoring page: sites, servers, watched services and graphs |
 | `traffic.png` | Traffic page, by site (Cloudflare) |
