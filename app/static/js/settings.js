@@ -53,7 +53,7 @@ PAGES.settings = {
     if (S.page !== "settings") return;
     this.cache = { users: u };
     $("#setBody").innerHTML = `
-      <div class="panel"><div class="hd"><h2>Users</h2><span class="meta">${u.items.length} user(s)</span>
+      <div class="panel"><div class="hd"><h2>Users</h2><span class="meta">${fmt.plural(u.items.length, "user")}</span>
         <div class="acts"><button class="btn sm pri" data-a="adduser">+ Add user</button></div></div>
         <div class="bd flush tbl-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody>
         ${u.items.map((x) => {
@@ -62,7 +62,7 @@ PAGES.settings = {
             <td>${me ? pill("info", x.role) : `<select class="sm" data-userrole="${x.id}">${u.roles.map((r) => `<option ${r === x.role ? "selected" : ""}>${r}</option>`).join("")}</select>`}</td>
             <td>${x.disabled ? pill("mute", "disabled") : x.must_change ? pill("warn", "must change password") : pill("ok", "active")}</td>
             <td class="small">${x.last_login ? esc(fmt.ago(x.last_login)) : "never"}</td>
-            <td><div class="row" style="justify-content:flex-end;flex-wrap:nowrap">${me ? `<button class="btn sm" data-a="mypw">Change my password</button>` : `
+            <td><div class="row" style="justify-content:flex-end;flex-wrap:nowrap">${me ? `<a class="btn sm" href="#/account">My account</a>` : `
               <button class="btn sm" data-a="resetpw" data-id="${x.id}" data-name="${esc(x.username)}">Reset password</button>
               <button class="btn sm" data-a="toggle" data-id="${x.id}" data-v="${x.disabled ? 0 : 1}">${x.disabled ? "Enable" : "Disable"}</button>
               <button class="btn sm danger" data-a="deluser" data-id="${x.id}" data-name="${esc(x.username)}">Delete</button>`}</div></td></tr>`;
@@ -193,7 +193,7 @@ PAGES.settings = {
     const ipHint = /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) ? location.hostname : "<this-dashboard-ip>";
     $("#setBody").innerHTML = `
       ${d.imported && (d.imported.users || d.imported.nodes || d.imported.cf_accounts) ? `<div class="panel"><div class="bd small muted">Imported from <code>config.yaml</code> on ${esc(fmt.time(d.imported.at))}
-        (${d.imported.users} user(s), ${d.imported.nodes} node(s), ${d.imported.cf_accounts} account(s)). Those entries in config.yaml are ignored now — manage everything here.</div></div>` : ""}
+        (${fmt.plural(d.imported.users, "user")}, ${fmt.plural(d.imported.nodes, "node")}, ${fmt.plural(d.imported.cf_accounts, "account")}). Those entries in config.yaml are ignored now — manage everything here.</div></div>` : ""}
       <div class="panel"><div class="hd"><h2>Nodes</h2><span class="meta">The servers this dashboard manages over SSH.</span>
         <div class="acts"><button class="btn sm pri" data-a="addnode">+ Add node</button></div></div>
         <div class="bd flush tbl-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Address</th><th>SSH user</th><th>Host key</th><th></th></tr></thead><tbody>
@@ -485,7 +485,9 @@ PAGES.settings = {
         <label>Allow sign-in only from these networks<input name="allowed_networks" type="text" value="${esc(g.allowed_networks)}" placeholder="anywhere — e.g. 192.168.10.0/24, 100.64.0.0/10">
           <div class="hint">Comma-separated addresses or networks. Empty = anywhere. Your current address must be in the list. Locked out? On the server: <code>gwconsole allow-all</code></div></label>
         <label class="check"><input type="checkbox" name="signin_alerts" ${g.signin_alerts ? "checked" : ""}> Message me (Telegram/Discord) on a sign-in from a new address, and when an address is locked out after failed attempts</label>
-        <div class="two"><label>Sign-in lasts (hours)<input name="session_hours" type="text" value="${g.session_hours}"></label><span></span></div>
+        <div class="two"><label>Sign-in lasts (hours)<input name="session_hours" type="text" value="${g.session_hours}"><div class="hint">The longest a sign-in can last, whatever anyone does.</div></label>
+          <label>Longest time away before sign-out<select name="max_idle_minutes">${[[0, "No limit — each user chooses"], [15, "15 min"], [30, "30 min"], [60, "1 h"], [240, "4 h"], [480, "8 h"]].map(([v, l]) => `<option value="${v}" ${+g.max_idle_minutes === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+            <div class="hint">Caps “Sign me out when I'm away” in everyone's My account, and applies to users who never chose.</div></label></div>
         <div class="row"><button class="btn pri" type="submit">Save</button></div></div></form>
       <div class="panel"><div class="bd small muted">Signed-in browsers are listed under <a href="#/settings/users">Users &amp; sessions</a>, where you can sign any of them out.</div></div>`;
     this.saveForm($("#signForm"), () => this.signin());
