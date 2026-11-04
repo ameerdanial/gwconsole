@@ -11,7 +11,15 @@ import secrets
 import time
 
 from .auth import hash_password, verify_password
-from .config import NAME_RE, CFAccount, CloudflaredNode, HAProxyNode, ServerNode, Settings, Tunnel
+from .config import (
+    NAME_RE,
+    CFAccount,
+    CloudflaredNode,
+    HAProxyNode,
+    ServerNode,
+    Settings,
+    Tunnel,
+)
 from .db import DB
 from .vault import Vault
 
@@ -40,7 +48,10 @@ GENERAL_DEFAULTS = {
     "update_notify": True,         # message Telegram/Discord when a new dashboard version is out
     # v1.4.1
     "max_idle_minutes": 0,         # longest "sign me out when I'm away" anyone may choose (0 = no limit)
+    # v1.5
+    "twofa_required": "superadmin",  # nobody | superadmin | everyone (installs upgraded from 1.4 start at "nobody")
 }
+TWOFA_POLICIES = ("nobody", "superadmin", "everyone")
 IDLE_CHOICES = (0, 15, 30, 60, 240, 480)      # minutes; 0 = only when the sign-in itself ends
 PREF_DEFAULTS = {
     "time24": True,                # 14:05 vs 2:05 PM
@@ -127,8 +138,58 @@ class Store:
 
     # ---------------------------------------------------------------- users
     def users(self) -> list[dict]:
-        return self.db.q("SELECT id, username, role, disabled, must_change, created_at, last_login, pw_changed_at "
-                         "FROM users ORDER BY username")
+        rows = self.db.q("SELECT id, username, role, disabled, must_change, created_at, last_login, pw_changed_at, "
+                         "scope_mode, totp_on FROM users ORDER BY username")
+        items = {}
+        for r in self.db.q("SELECT user_id, kind, ref FROM user_scope ORDER BY kind, ref"):
+            items.setdefault(r["user_id"], []).append({"kind": r["kind"], "ref": r["ref"]})
+        for r in rows:
+            r["totp_on"] = bool(r["totp_on"])
+            r["scope"] = items.get(r["id"], []) if r["scope_mode"] == "pick" else []
+        return rows
+
+    # ---------------------------------------------------------------- scoped access (v1.5)
+    def scope_items(self, uid: int) -> list[dict]:
+        return self.db.q("SELECT kind, ref FROM user_scope WHERE user_id=? ORDER BY kind, ref", (uid,))
+
+    def set_scope(self, uid: int, mode: str, items: list[dict]) -> dict:
+        """mode 'all' (everything their role allows) or 'pick' (only the tunnels, domains and extra backends given)."""
+        u = self.user_by_id(uid)
+        if not u:
+            raise KeyError("no such user")
+        if mode not in ("all", "pick"):
+            raise ValueError("access must be 'all' or 'pick'")
+        clean = []
+        if mode == "pick":
+            if u["role"] == "superadmin":
+                raise ValueError("a superadmin always has everything — change the role first")
+            for i in items or []:
+                kind, ref = str(i.get("kind", "")), str(i.get("ref", "")).strip()
+                if kind == "domain":
+                    ref = ref.lower().rstrip(".")
+                    if not re.fullmatch(r"(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", ref):
+                        raise ValueError(f"{ref or 'empty'} isn't a domain name (use example.com or *.example.com)")
+                elif kind in ("tunnel", "backend"):
+                    if not re.fullmatch(r"[A-Za-z0-9_.\-]{1,64}/[A-Za-z0-9_.:\-]{1,128}", ref):
+                        raise ValueError(f"{ref or 'empty'} must look like node/name")
+                else:
+                    raise ValueError(f"unknown kind {kind}")
+                if (kind, ref) not in {(c["kind"], c["ref"]) for c in clean}:
+                    clean.append({"kind": kind, "ref": ref})
+            if not clean:
+                raise ValueError("pick at least one tunnel, domain or backend (or choose Everything)")
+            if len(clean) > 200:
+                raise ValueError("too many items")
+        before = {"mode": u["scope_mode"], "items": self.scope_items(uid)}
+        with self.db.tx():
+            self.db.x("DELETE FROM user_scope WHERE user_id=?", (uid,))
+            for c in clean:
+                self.db.x("INSERT INTO user_scope (user_id, kind, ref) VALUES (?,?,?)", (uid, c["kind"], c["ref"]))
+            self.db.x("UPDATE users SET scope_mode=?, scope_ver=scope_ver+1 WHERE id=?", (mode, uid))
+        return {"before": before, "after": {"mode": mode, "items": clean}}
+
+    def scoped_users(self) -> list[str]:
+        return [r["username"] for r in self.db.q("SELECT username FROM users WHERE scope_mode='pick' AND disabled=0")]
 
     def user(self, username: str) -> dict | None:
         return self.db.one("SELECT * FROM users WHERE username = ?", (username,))
@@ -165,6 +226,86 @@ class Store:
             check_password_strength(password)
         self.db.x("UPDATE users SET pw_hash=?, must_change=?, pw_changed_at=? WHERE id=?",
                   (hash_password(password), int(must_change), now(), uid))
+        self.db.x("DELETE FROM trusted_browsers WHERE user_id=?", (uid,))   # a new password asks for the code again
+
+    # ---------------------------------------------------------------- two-step sign-in (v1.5)
+    def twofa_status(self, uid: int) -> dict:
+        u = self.user_by_id(uid) or {}
+        rc = json.loads(u.get("totp_recovery") or "[]")
+        n = self.db.one("SELECT COUNT(*) n FROM trusted_browsers WHERE user_id=? AND expires_at > ?", (uid, now()))["n"]
+        return {"on": bool(u.get("totp_on")), "set_at": u.get("totp_set_at"),
+                "recovery_left": sum(1 for r in rc if not r.get("used")) if u.get("totp_on") else 0,
+                "required": self.twofa_required_for(u.get("role", "")), "trusted_browsers": n}
+
+    def twofa_start(self, uid: int) -> str:
+        """A new secret, kept as pending until the user proves their app shows the right code."""
+        from . import totp
+        secret = totp.new_secret()
+        self.db.x("UPDATE users SET totp_pending=? WHERE id=?", (self.vault.encrypt(secret), uid))
+        return secret
+
+    def twofa_confirm(self, uid: int, code: str) -> list[str]:
+        from . import totp
+        u = self.user_by_id(uid)
+        secret = self.vault.decrypt((u or {}).get("totp_pending") or "")
+        if not secret:
+            raise ValueError("start the setup again")
+        step = totp.verify(secret, code)
+        if step is None:
+            raise ValueError("that code doesn't match — check the phone's clock and try the newest code")
+        codes = totp.new_recovery_codes()
+        self.db.x("UPDATE users SET totp_secret=?, totp_pending=NULL, totp_on=1, totp_last_step=?, totp_recovery=?, "
+                  "totp_set_at=? WHERE id=?", (self.vault.encrypt(secret), step, json.dumps([totp.hash_recovery(c) for c in codes]),
+                                               now(), uid))
+        return codes
+
+    def twofa_check(self, uid: int, code: str = "", recovery: str = "") -> str | None:
+        """'code' or 'recovery' when it matches (and marks it used), None otherwise."""
+        from . import totp
+        u = self.user_by_id(uid)
+        if not u or not u["totp_on"]:
+            return None
+        if code:
+            step = totp.verify(self.vault.decrypt(u["totp_secret"] or ""), code, int(u["totp_last_step"] or 0))
+            if step is not None:
+                self.db.x("UPDATE users SET totp_last_step=? WHERE id=?", (step, uid))
+                return "code"
+        if recovery:
+            rc = json.loads(u["totp_recovery"] or "[]")
+            i = totp.match_recovery(recovery, rc)
+            if i is not None:
+                rc[i]["used"] = now()
+                self.db.x("UPDATE users SET totp_recovery=? WHERE id=?", (json.dumps(rc), uid))
+                return "recovery"
+        return None
+
+    def twofa_new_recovery(self, uid: int) -> list[str]:
+        from . import totp
+        codes = totp.new_recovery_codes()
+        self.db.x("UPDATE users SET totp_recovery=? WHERE id=?", (json.dumps([totp.hash_recovery(c) for c in codes]), uid))
+        return codes
+
+    def twofa_off(self, uid: int):
+        """Turn two-step sign-in off (also a superadmin's reset): secret, codes and remembered browsers go."""
+        self.db.x("UPDATE users SET totp_on=0, totp_secret=NULL, totp_pending=NULL, totp_last_step=0, totp_recovery='[]', "
+                  "totp_set_at=NULL WHERE id=?", (uid,))
+        self.db.x("DELETE FROM trusted_browsers WHERE user_id=?", (uid,))
+
+    def trust_browser(self, uid: int, days: int = 30, ip: str = "", ua: str = "") -> str:
+        tok = secrets.token_urlsafe(32)
+        t = now()
+        self.db.x("INSERT INTO trusted_browsers (token_hash, user_id, created_at, expires_at, ip, user_agent) VALUES (?,?,?,?,?,?)",
+                  (_tok_hash(tok), uid, t, t + days * 86400, ip, (ua or "")[:200]))
+        return tok
+
+    def trusted(self, uid: int, tok: str | None) -> bool:
+        if not tok:
+            return False
+        self.db.x("DELETE FROM trusted_browsers WHERE expires_at < ?", (now(),))
+        return bool(self.db.one("SELECT 1 FROM trusted_browsers WHERE token_hash=? AND user_id=?", (_tok_hash(tok), uid)))
+
+    def forget_browsers(self, uid: int) -> int:
+        return self.db.x("DELETE FROM trusted_browsers WHERE user_id=?", (uid,))
 
     def _guard_last_superadmin(self, uid: int, new_role: str | None = None, disabling: bool = False):
         u = self.user_by_id(uid)
@@ -180,6 +321,9 @@ class Store:
             raise ValueError(f"role must be one of {', '.join(ROLES)}")
         self._guard_last_superadmin(uid, new_role=role)
         self.db.x("UPDATE users SET role=? WHERE id=?", (role, uid))
+        if role == "superadmin":                  # a superadmin always has everything
+            self.db.x("UPDATE users SET scope_mode='all', scope_ver=scope_ver+1 WHERE id=?", (uid,))
+            self.db.x("DELETE FROM user_scope WHERE user_id=?", (uid,))
 
     def set_disabled(self, uid: int, disabled: bool):
         self._guard_last_superadmin(uid, disabling=disabled)
@@ -258,13 +402,13 @@ class Store:
         `idle` = seconds since the person last clicked or typed in the browser (X-GWC-Idle header);
         auto-refresh requests carry it too, so they don't count as being there. When the user's idle
         limit has passed the session is ended and self.expired_reason says why."""
-        self.expired_reason = ""
+        self.expired_reason = self.expired_user = ""
         if not tok:
             return None
         h = _tok_hash(tok)
         r = self.db.one("SELECT s.token_hash, s.created_at, s.expires_at, s.last_seen, s.last_active, u.id, u.username, "
-                        "u.role, u.disabled, u.must_change, u.prefs FROM sessions s JOIN users u ON u.id = s.user_id "
-                        "WHERE s.token_hash = ?", (h,))
+                        "u.role, u.disabled, u.must_change, u.prefs, u.scope_mode, u.scope_ver, u.totp_on "
+                        "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?", (h,))
         if not r:
             return None
         t = now()
@@ -280,14 +424,37 @@ class Store:
         if limit and t - last_active > limit * 60:
             self.db.x("DELETE FROM sessions WHERE token_hash=?", (h,))
             self.expired_reason = f"signed out after {limit} minutes away"
+            self.expired_user = r["username"]
             return None
         active = t if idle is None else max(last_active, t - max(0, int(idle)))
         if t - r["last_seen"] > 60 or active - last_active > 30:
             self.db.x("UPDATE sessions SET last_seen=?, last_active=? WHERE token_hash=?", (t, active, h))
         return {"id": r["id"], "username": r["username"], "role": r["role"], "must_change": bool(r["must_change"]),
-                "sid": h[:16], "idle_limit": limit, "prefs": prefs}
+                "sid": h[:16], "idle_limit": limit, "prefs": prefs, "scope_mode": r["scope_mode"],
+                "scope_ver": r["scope_ver"], "totp_on": bool(r["totp_on"]),
+                "must_setup_2fa": not r["totp_on"] and self.twofa_required_for(r["role"])}
+
+    def twofa_required_for(self, role: str) -> bool:
+        p = self.general().get("twofa_required", "nobody")
+        return p == "everyone" or (p == "superadmin" and role == "superadmin")
+
+    def purge_sessions(self):
+        """Drop sign-ins that have ended: past their absolute expiry, or away longer than the user's idle limit
+        (those are otherwise only removed when that browser makes its next request)."""
+        t = now()
+        self.db.x("DELETE FROM sessions WHERE expires_at < ?", (t,))
+        for u in self.db.q("SELECT DISTINCT u.id, u.prefs FROM sessions s JOIN users u ON u.id = s.user_id"):
+            try:
+                prefs = dict(PREF_DEFAULTS, **{k: v for k, v in json.loads(u["prefs"] or "{}").items() if k in PREF_DEFAULTS})
+            except ValueError:
+                prefs = dict(PREF_DEFAULTS)
+            limit = self.idle_limit(u["id"], prefs)
+            if limit:
+                self.db.x("DELETE FROM sessions WHERE user_id=? AND COALESCE(last_active, last_seen, created_at) < ?",
+                          (u["id"], t - limit * 60))
 
     def user_sessions(self, uid: int) -> list[dict]:
+        self.purge_sessions()
         return self.db.q("SELECT substr(token_hash, 1, 16) AS sid, created_at, expires_at, last_seen, last_active, ip, "
                          "user_agent FROM sessions WHERE user_id=? AND expires_at > ? ORDER BY last_seen DESC", (uid, now()))
 
@@ -307,8 +474,8 @@ class Store:
             self.db.x("DELETE FROM sessions WHERE user_id=?", (uid,))
 
     def sessions(self) -> list[dict]:
-        self.db.x("DELETE FROM sessions WHERE expires_at < ?", (now(),))
-        return self.db.q("SELECT substr(s.token_hash,1,16) sid, u.username, u.role, s.created_at, s.last_seen, "
+        self.purge_sessions()
+        return self.db.q("SELECT substr(s.token_hash,1,16) sid, u.username, u.role, s.created_at, s.last_seen, s.last_active, "
                          "s.expires_at, s.ip, s.user_agent FROM sessions s JOIN users u ON u.id=s.user_id "
                          "ORDER BY s.last_seen DESC")
 
@@ -347,6 +514,10 @@ class Store:
                     raise ValueError("backup folder must be an absolute path")
             elif k == "allowed_networks":
                 v = normalize_networks(v)
+            elif k == "twofa_required":
+                v = str(v)
+                if v not in TWOFA_POLICIES:
+                    raise ValueError("two-step sign-in can be required for nobody, superadmin or everyone")
             else:
                 v = int(v)
                 if k == "max_idle_minutes" and v not in IDLE_CHOICES:
