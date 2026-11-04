@@ -19,6 +19,7 @@ def store(tmp_path):
 def client(tmp_path, monkeypatch):
     """The FastAPI app with an empty node list, a superadmin 'root' and no background checker."""
     from fastapi.testclient import TestClient
+
     from app.auth import hash_password
     cfg = tmp_path / "config.yaml"
     cfg.write_text(textwrap.dedent(f"""
@@ -34,4 +35,6 @@ def client(tmp_path, monkeypatch):
     from app.main import app
     app.state.no_engine = True
     with TestClient(app) as c:
+        from app.state import st
+        st.store.set_general({"twofa_required": "nobody"})   # tests that need the 2FA policy set it themselves
         yield c
