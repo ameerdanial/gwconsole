@@ -1,5 +1,5 @@
-# CI: on every push and pull request, run the tests on Python 3.11-3.13 and
-# syntax-check the shell scripts and the web UI JavaScript.
+# CI: on every push and pull request, run the tests on Python 3.11-3.13 (with real HAProxy and a leak check),
+# syntax-check the shell scripts and the web UI JavaScript, lint the Python code and audit its packages.
 name: CI
 
 on:
@@ -19,9 +19,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+      - name: HAProxy (so the real "haproxy -c" config test runs instead of being skipped)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq haproxy
       - run: pip install -r requirements-dev.txt
       - run: python -m compileall -q app
-      - run: python -m pytest -q
+      - run: python -m pytest -q -rs -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
 
   lint:
     runs-on: ubuntu-latest
@@ -33,3 +35,10 @@ jobs:
         run: for f in app/static/js/*.js; do node --check "$f"; done
       - name: VERSION is semver
         run: grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Python lint (unused imports, undefined names)
+        run: pip install ruff && ruff check --select F app tests
+      - name: Known vulnerabilities in the Python packages
+        run: pip install pip-audit && pip-audit -r requirements.txt
