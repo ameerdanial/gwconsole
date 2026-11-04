@@ -15,6 +15,10 @@ from .config import CFAccount, Settings
 API = os.environ.get("GWC_CF_API", "https://api.cloudflare.com/client/v4")
 
 
+
+def _n(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
 class CFError(Exception):
     pass
 
@@ -285,7 +289,7 @@ class Cloudflare:
         try:
             s, j = await self._raw(acc, "GET", f"/accounts/{acc.account_id}/cfd_tunnel", params={"per_page": 1})
             if j.get("success"):
-                res("Cloudflare Tunnel: Read", True, f"{(j.get('result_info') or {}).get('total_count', len(j.get('result') or []))} tunnel(s)")
+                res("Cloudflare Tunnel: Read", True, _n((j.get('result_info') or {}).get('total_count', len(j.get('result') or [])), "tunnel"))
             else:
                 res("Cloudflare Tunnel: Read", False, self._errtext(s, j))
             s, j = await self._raw(acc, "POST", f"/accounts/{acc.account_id}/cfd_tunnel", json={"config_src": "local"})
@@ -300,7 +304,7 @@ class Cloudflare:
             s, j = await self._raw(acc, "GET", "/zones", params={"account.id": acc.account_id, "per_page": 50})
             zones = (j.get("result") or []) if j.get("success") else []
             res("Zone: Read", bool(j.get("success")),
-                (f"{len(zones)} zone(s): " + ", ".join(z["name"] for z in zones[:6])) if j.get("success") else self._errtext(s, j))
+                (f"{_n(len(zones), 'zone')}: " + ", ".join(z["name"] for z in zones[:6])) if j.get("success") else self._errtext(s, j))
             if zones:
                 zid = zones[0]["id"]
                 s, j = await self._raw(acc, "GET", f"/zones/{zid}/dns_records", params={"per_page": 1})
