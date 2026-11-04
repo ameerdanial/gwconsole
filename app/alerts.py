@@ -83,6 +83,8 @@ class Engine:
             hp, tun = await collect_all()
             current, unknown = build_alerts(hp, tun, bool(st.s.cf_accounts))
             current += await self.drift_alerts()
+            from .api_system import backup_alerts
+            current += await asyncio.to_thread(backup_alerts)
             mon = getattr(st, "monitor", None)
             if mon:
                 mon.record_haproxy(hp)
