@@ -28,9 +28,11 @@ MAJOR for breaking config/install changes, MINOR for new features, PATCH for fix
   - Settings → Sign-in security → **Require two-step sign-in for**: nobody / superadmins / everyone.
     Users who need it are asked to set it up right after signing in;
   - superadmins can **Reset 2FA** for someone who lost their phone (Settings → Users), and on the
-    host `gwconsole reset-2fa <user>`.
+    host `gwconsole reset-2fa <user>`;
+  - a superadmin without it sees a reminder at the top ("Not now" hides it for 30 days).
 - **Restore from the dashboard** (Settings → Backups):
-  - **Restore…** on every backup in the list, or **drop a file** (`.gwcbak` with its passphrase, or
+  - **Restore…** on every backup in the list (nightly, manual and the ones taken before each
+    update), or **drop a file** (`.gwcbak` with its passphrase, or
     `.tar.gz`, up to 200 MB) from this or another Gateway Console;
   - the dialog shows what the backup holds (version, date, users, nodes, Cloudflare accounts) and
     what will be lost (users, nodes and activity added since);
