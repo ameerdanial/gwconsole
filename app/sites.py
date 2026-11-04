@@ -61,16 +61,29 @@ def _bind_parts(addr: str) -> tuple[str, int | None]:
         return host, None
 
 
-def find_frontend(models: dict, ip: str, port: int | None) -> tuple[str, dict] | None:
-    """The HAProxy frontend listening on ip:port, if one of the managed nodes is that address."""
+LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def is_loopback(host: str) -> bool:
+    return host in LOOPBACK or host.startswith("127.")
+
+
+def find_frontend(models: dict, ip: str, port: int | None, origin_host: str = "") -> tuple[str, dict] | None:
+    """The HAProxy frontend listening on ip:port, if one of the managed nodes is that address.
+    A loopback address (localhost) means the machine cloudflared runs on (`origin_host`), so it only
+    matches an HAProxy node on that same machine."""
     if not ip or not port:
         return None
+    loop = is_loopback(ip)
     for node, m in models.items():
+        same = m["host"] == ip or (loop and (m["host"] == origin_host or is_loopback(m["host"])))
         for fe in m["frontends"]:
             for b in fe.get("binds") or []:
                 for one in str(b.get("addr", "")).split(","):
                     bip, bport = _bind_parts(one)
-                    if bport == port and (bip == ip or (bip in ANY and ip in (m["host"], "127.0.0.1", "localhost"))):
+                    if bport != port:
+                        continue
+                    if (bip in ANY and same) or bip == ip and (not loop or same):
                         return node, fe
     return None
 
@@ -85,12 +98,12 @@ def backend_for(fe: dict, hostname: str) -> tuple[str, str]:
     return fe.get("default_backend", ""), ("default" if fe.get("default_backend") else "")
 
 
-def route(models: dict, hostname: str, service: str) -> dict:
-    """Where one ingress rule's traffic goes after cloudflared."""
+def route(models: dict, hostname: str, service: str, origin_host: str = "") -> dict:
+    """Where one ingress rule's traffic goes after cloudflared (`origin_host` = the cloudflared node)."""
     scheme, ip, port = split_service(service)
     kind = "http" if scheme in ("http", "https") else ("tcp" if port else "other")
     r = {"service": service, "kind": kind, "hp_node": "", "frontend": "", "backend": "", "how": "", "direct": True}
-    f = find_frontend(models, ip, port)
+    f = find_frontend(models, ip, port, origin_host)
     if f:
         node, fe = f
         be, how = backend_for(fe, hostname)
@@ -123,9 +136,14 @@ async def discover(tunnels: dict | None = None) -> list[dict]:
                 h = (rule.get("hostname") or "").lower()
                 if not h or "*" in h or h in out:
                     continue
-                rt = route(models, h, rule.get("service", ""))
+                rt = route(models, h, rule.get("service", ""), n.get("host", ""))
                 if rt["kind"] == "other":
                     continue
+                o = rule.get("origin") or {}
+                rt["origin"] = {k: o[k] for k in ("httpHostHeader", "originServerName", "noTLSVerify") if k in o}
+                # localhost on the cloudflared machine can only be checked from that machine
+                if is_loopback(split_service(rule.get("service", ""))[1]):
+                    rt["via_node"] = n["node"]
                 out[h] = {"host": h, "kind": rt["kind"], "source": "tunnel", "path": rule.get("path") or "",
                           "internal": rule.get("service", ""), "route": rt,
                           "tunnel": {"node": n["node"], "name": t["name"], "account": t.get("cf_account", "")}}
