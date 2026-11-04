@@ -174,12 +174,16 @@ const HPF = {
     }
     if (!m) return `<div class="part">${head}<div class="pb">${top}</div></div>`;
     const tcp = this.effMode(m) === "tcp";
+    if (m.locked) {                        // scoped access: only the user's own host rules can change
+      fe.tab = "routing";
+      return `<div class="part">${head}<div class="pb">${top}<div class="scopenote">🔒 Only your own host rules are shown here. Listen addresses, HTTPS, limits and rules for other sites are locked.</div>${this.fe_routing(m, tcp)}</div></div>`;
+    }
     const tabs = this.tabs("fe.tab", [["routing", "Routing", m.rules.length || ""], ["bind", "Bind & HTTPS", m.binds.length], ["headers", "Headers & redirects", m.headers.length || ""],
       ["limits", "Limits & timeouts"], ["advanced", "Advanced", m.advanced ? m.advanced.split("\n").length : ""]]);
     return `<div class="part">${head}<div class="pb">${top}${tabs}${this["fe_" + fe.tab](m, tcp)}</div></div>`;
   },
   fe_routing(m, tcp) {
-    const conds = this.COND.filter(([k]) => (tcp ? ["sni", "src"] : this.COND.map((c) => c[0]).filter((c) => c !== "sni")).includes(k));
+    const conds = this.COND.filter(([k]) => (m.locked ? (tcp ? ["sni"] : ["host"]) : tcp ? ["sni", "src"] : this.COND.map((c) => c[0]).filter((c) => c !== "sni")).includes(k));
     const acts = tcp ? this.ACT.filter(([k]) => ["backend", "deny"].includes(k)) : this.ACT;
     const rows = m.rules.map((r, i) => {
       const p = `fe.model.rules.${i}`;
@@ -196,7 +200,7 @@ const HPF = {
     return `<table class="ft"><tr><th style="width:24%">When</th><th>Value</th><th style="width:20%">Then</th><th style="width:22%">Target</th><th style="width:78px"></th></tr>${rows ||
       `<tr><td colspan="5" class="muted small">No rules — everything goes to the default backend.</td></tr>`}</table>
       <div class="row"><button type="button" class="lnk" data-addrule>+ Add rule</button><span class="muted small">Rules are checked top to bottom; the first match wins.</span></div>
-      ${this.sel("Everything else goes to (default backend)", "fe.model.default_backend", this.backendOpts([["", "— none —"]]), true)}`;
+      ${m.locked ? "" : this.sel("Everything else goes to (default backend)", "fe.model.default_backend", this.backendOpts([["", "— none —"]]), true)}`;
   },
   fe_bind(m, tcp) {
     const rows = m.binds.map((b, i) => `<div class="bindrow">${this.inp(i ? "" : "Address : port", `fe.model.binds.${i}.addr`, "*:443", "nolab grow")}
