@@ -1,18 +1,20 @@
-"""System APIs: version and What's new, update check / install (through the root helper),
-backups (list, back up now, passphrase-protected download) and the post-update banner."""
+"""System APIs: version and What's new, update check / install (through the root helper), backups (list with
+a nightly-style check, back up now, passphrase-protected download, restore from the list or an upload) and the post-update banner."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import secrets
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import Response
 
 from . import __version__, backup
-from .state import audit, need, shielded, st, user
+from .state import audit, need, scope, shielded, st, user
 
 router = APIRouter(prefix="/api")
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -188,7 +190,7 @@ def _host_info() -> dict:
     import platform
     pretty = ""
     try:
-        for line in open("/etc/os-release"):
+        for line in Path("/etc/os-release").read_text().splitlines():
             if line.startswith("PRETTY_NAME="):
                 pretty = line.split("=", 1)[1].strip().strip('"')
     except OSError:
@@ -261,13 +263,181 @@ async def whatsnew_seen(request: Request):
 
 
 # ---- backups -----------------------------------------------------------------------
+_verify_cache: dict = {}
+SPOOL_TTL = 3600
+
+
+def spool_dir() -> str:
+    """Uploaded backups wait here (owned by the dashboard user) until restored or for an hour."""
+    d = os.path.join(os.path.dirname(st.base.db_path), "restore-spool")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    t = time.time()
+    for n in os.listdir(d):
+        try:
+            if t - os.path.getmtime(os.path.join(d, n)) > SPOOL_TTL:
+                os.unlink(os.path.join(d, n))
+        except OSError:
+            pass
+    return d
+
+
+def _listed(name: str) -> str:
+    if not backup.NAME_RE.match(name) or name not in {x["name"] for x in backup.listing(BACKUP_DIR)}:
+        raise KeyError("backup not found")
+    return os.path.join(BACKUP_DIR, name)
+
+
+def _preview(data: bytes, name: str) -> dict:
+    """What restoring this backup brings back and what is lost (users, nodes, activity added since)."""
+    try:
+        key = Path(st.base.secret_key_file).read_bytes()
+    except OSError:
+        key = None
+    info = backup.inspect(data, key, name=name)
+    if not info["created_ts"] and backup.NAME_RE.match(name):     # upgrade backups have no marker: use the file's time
+        try:
+            info["created_ts"] = int(os.path.getmtime(os.path.join(BACKUP_DIR, name)))
+        except OSError:
+            pass
+    cur_users = {u["username"] for u in st.store.users()}
+    cur_nodes = {n["name"] for n in st.store.node_rows()}
+    created = info["created_ts"]
+    newer = st.audit.search(since=created, limit=1)["matched"] if created else 0
+    return {"name": name, **info, "users": len(info["users"]), "nodes": len(info["nodes"]),
+            "newer_than_running": bool(info["version"]) and backup.vt(info["version"]) > backup.vt(__version__),
+            "lost": {"users": sorted(cur_users - set(info["users"])), "nodes": sorted(cur_nodes - set(info["nodes"])),
+                     "activity": newer}}
+
+
+def backup_alerts() -> list[dict]:
+    """A warning when the newest backup can't be opened or its database is damaged (checked once per file)."""
+    items = [b for b in backup.listing(BACKUP_DIR) if b["kind"] == "backup"]
+    if not items:
+        return []
+    b = items[0]
+    try:
+        r = backup.verify_file(os.path.join(BACKUP_DIR, b["name"]), _verify_cache)
+    except OSError:
+        return []
+    if r["ok"]:
+        return []
+    return [{"key": f"backup.broken|{b['name']}", "kind": "backup.broken", "sev": "warn", "node": "", "where": "dashboard backups",
+             "msg": f"the newest backup {b['name']} is damaged ({r['error'] or 'unknown error'}) — run Back up now and check the disk"}]
+
+
 @router.get("/admin/backups")
 async def backups(request: Request):
     need(request, "superadmin")
     g = st.store.general()
-    return {"items": backup.listing(BACKUP_DIR), "last": helper_status().get("last_backup"), "pending": pending(),
+    items = backup.listing(BACKUP_DIR)
+    for b in items:                              # each backup is opened and checked once (cached)
+        b.update(await asyncio.to_thread(backup.verify_file, os.path.join(BACKUP_DIR, b["name"]), _verify_cache))
+    hs = helper_status()
+    return {"items": items, "last": hs.get("last_backup"), "pending": pending(), "restore": hs.get("restore"),
             "settings": {k: g[k] for k in ("nightly_backup", "backup_copy_node", "backup_copy_dir")},
             "nodes": [n["name"] for n in st.store.node_rows()]}
+
+
+@router.get("/admin/backups/{name}/preview")
+async def backup_preview(request: Request, name: str):
+    need(request, "superadmin")
+    data = await asyncio.to_thread(backup.open_bytes, _listed(name))
+    return await asyncio.to_thread(_preview, data, name)
+
+
+@router.post("/admin/backups/upload")
+async def backup_upload(request: Request):
+    """Step 1 of restoring from a file: the raw upload (a .gwcbak or .tar.gz, up to 200 MB) goes to the spool
+    folder. Nothing is decrypted or changed yet."""
+    need(request, "superadmin")
+    uid = secrets.token_hex(8)
+    path = os.path.join(spool_dir(), f"upload-{uid}.raw")
+    size = 0
+    with open(path, "wb") as f:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > backup.MAX_UPLOAD:
+                f.close()
+                os.unlink(path)
+                raise HTTPException(413, "that file is bigger than 200 MB — it isn't a Gateway Console backup")
+            f.write(chunk)
+    if not size:
+        os.unlink(path)
+        raise ValueError("the file is empty")
+    with open(path, "rb") as f:
+        encrypted = f.read(len(backup.MAGIC)) == backup.MAGIC
+    return {"upload_id": uid, "encrypted": encrypted, "size": size}
+
+
+@router.post("/admin/backups/upload/{uid}/open")
+async def backup_upload_open(request: Request, uid: str, body: dict = Body(default={})):
+    """Step 2: decrypt (if it's a .gwcbak) and check it; the checked .tar.gz replaces the raw upload."""
+    need(request, "superadmin")
+    if not re.fullmatch(r"[0-9a-f]{16}", uid):
+        raise KeyError("upload not found")
+    raw = os.path.join(spool_dir(), f"upload-{uid}.raw")
+    plain = os.path.join(spool_dir(), f"upload-{uid}.tar.gz")
+    if not os.path.exists(raw) and os.path.exists(plain):
+        data = backup.open_bytes(plain)
+    else:
+        if not os.path.exists(raw):
+            raise KeyError("that upload has expired — choose the file again")
+        data = backup.open_bytes(raw)
+        if data.startswith(backup.MAGIC):
+            data = backup.decrypt(data, str(body.get("passphrase", "")))       # ValueError → "wrong passphrase"
+        try:
+            backup.check_archive(data)
+        except Exception as e:
+            raise ValueError(f"this isn't a usable Gateway Console backup: {e}") from e
+        old = os.umask(0o077)
+        try:
+            Path(plain).write_bytes(data)
+        finally:
+            os.umask(old)
+        os.unlink(raw)
+    return await asyncio.to_thread(_preview, data, f"upload-{uid}.tar.gz")
+
+
+@router.post("/admin/backups/restore")
+async def backup_restore(request: Request, body: dict = Body(...)):
+    """Restore a listed backup or a checked upload through the root helper, after the password, the current
+    two-step code (when it's on) and typing RESTORE."""
+    need(request, "superadmin")
+    from .auth import verify_password
+    u = user(request)
+    full = st.store.user_by_id(u["id"]) or {}
+    if str(body.get("confirm", "")).strip() != "RESTORE":
+        raise ValueError("type RESTORE to confirm")
+    if not verify_password(str(body.get("password", "")), full.get("pw_hash", "")):
+        audit(request, "restore refused", str(body.get("name", ""))[:80], False, "wrong password")
+        raise ValueError("wrong password")
+    if full.get("totp_on") and not st.store.twofa_check(u["id"], code=str(body.get("code") or "")):
+        audit(request, "restore refused", str(body.get("name", ""))[:80], False, "wrong two-step code")
+        raise ValueError("that two-step code doesn't match")
+    name = str(body.get("name", ""))
+    if re.fullmatch(r"upload-[0-9a-f]{16}\.tar\.gz", name):
+        path = os.path.join(spool_dir(), name)
+        if not os.path.isfile(path):
+            raise KeyError("that upload has expired — choose the file again")
+    else:
+        path = _listed(name)
+    info = await asyncio.to_thread(_preview, backup.open_bytes(path), name)
+    if info["newer_than_running"]:
+        raise ValueError(f"this backup was made by v{info['version']}, newer than this dashboard (v{__version__}) — update first")
+    if not info["db_ok"]:
+        raise ValueError(f"the database in this backup is damaged ({info['db_error']}) — pick another backup")
+    if (helper_status().get("restore") or {}).get("state") == "running":
+        raise ValueError("a restore is already running")
+    request_helper(f"restore {name} by {u['username']}")
+    audit(request, "restore requested", name, True, f"v{info['version'] or '?'} backup from {info['created'] or '?'}"
+          f"{'' if info['same_key'] is not False else ' (from another dashboard: different secret.key)'}")
+    return {"ok": True, "name": name}
+
+
+@router.get("/admin/backups/restore/status")
+async def restore_status(request: Request):
+    need(request, "superadmin")
+    return {"restore": helper_status().get("restore"), "pending": pending()}
 
 
 @router.post("/admin/backups/run")
@@ -284,7 +454,7 @@ async def backup_download(request: Request, body: dict = Body(...)):
     name = str(body.get("name", ""))
     if not backup.NAME_RE.match(name) or name not in {x["name"] for x in backup.listing(BACKUP_DIR)}:
         raise KeyError("backup not found")
-    data = open(os.path.join(BACKUP_DIR, name), "rb").read()
+    data = Path(BACKUP_DIR, name).read_bytes()
     blob = backup.encrypt(data, str(body.get("passphrase", "")))
     audit(request, "backup download", name, True)
     out = name.replace(".tar.gz", ".gwcbak")
@@ -296,6 +466,7 @@ async def backup_download(request: Request, body: dict = Body(...)):
 @router.get("/versions")
 async def node_versions(request: Request):
     from .versions import versions
+    scope(request).need_all("Node software versions")
     return {"items": await versions(st)}
 
 
@@ -304,6 +475,7 @@ async def node_versions(request: Request):
 async def cloudflared_update(request: Request, node: str):
     from .versions import update_cloudflared
     need(request, "operator")
+    scope(request).need_all("Updating cloudflared")
     n = next((x for x in st.s.cloudflared_nodes if x.name == node), None)
     if not n:
         raise KeyError(f"cloudflared node {node} not found")
@@ -321,6 +493,7 @@ async def cloudflared_update(request: Request, node: str):
 @router.get("/admin/config-history")
 async def config_history(request: Request, node: str = "", limit: int = 60):
     import asyncio
+
     from . import history
     need(request, "superadmin")
     repo = history.repo_dir(st.base.db_path)
@@ -330,6 +503,7 @@ async def config_history(request: Request, node: str = "", limit: int = 60):
 @router.get("/admin/config-history/{commit}")
 async def config_history_show(request: Request, commit: str):
     import asyncio
+
     from . import history
     need(request, "superadmin")
     return {"text": await asyncio.to_thread(history.show_sync, history.repo_dir(st.base.db_path), commit)}
