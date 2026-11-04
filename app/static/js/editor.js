@@ -105,7 +105,7 @@ const Editor = {
     const ta = $("[data-ta]", this.el);
     ta.value = r.content; this._lines(); this._mark();
     $("[data-fpath]", this.el).textContent = r.path;
-    $("[data-info]", this.el).textContent = `loaded ${new Date().toLocaleTimeString()} · sha256 ${r.hash.slice(0, 10)}`;
+    $("[data-info]", this.el).textContent = `loaded ${fmt.clock(Date.now() / 1000, true)} · sha256 ${r.hash.slice(0, 10)}`;
     $("[data-out]", this.el).classList.add("hidden");
   },
 
