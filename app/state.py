@@ -1,5 +1,5 @@
 """Shared runtime state and request helpers used by every API module:
-the live Settings, SSH pool, Cloudflare client, database store, role checks and audit."""
+the live Settings, SSH pool, Cloudflare client, database store, role and scope checks and audit."""
 from __future__ import annotations
 
 import asyncio
@@ -59,6 +59,17 @@ def need(request: Request, role: str):
     u = user(request)
     if ROLE_LEVEL.get(u.get("role"), -1) < ROLE_LEVEL[role]:
         raise HTTPException(403, f"your role ({u.get('role')}) can't do this; needs {role}")
+
+
+def scope(request: Request):
+    """The signed-in user's scoped access (scope.Scope); ALL for superadmins and users set to Everything."""
+    from . import scope as scopemod
+    sc = getattr(request.state, "scope", None)
+    if sc is None:
+        u = user(request)
+        sc = scopemod.load(st.store, u) if u.get("id") else scopemod.Scope(all=True)
+        request.state.scope = sc
+    return sc
 
 
 def ip(r: Request) -> str:
