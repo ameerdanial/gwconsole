@@ -60,7 +60,7 @@ PAGES.setup = {
       <div class="panel"><div class="hd"><h2>Where to find these</h2></div><div class="bd small help">
         <p><b>Account ID</b>: <code>dash.cloudflare.com</code> → click a domain → right-hand column, <b>API</b> box → <b>Account ID</b> (also the long code in the address bar).</p>
         <p><b>API token</b>: person icon → <b>Profile</b> → <b>API Tokens</b> → <b>Create Token</b> → <b>Create Custom Token</b>:</p>
-        <table class="mini-t"><tr><td>Account</td><td>Cloudflare Tunnel</td><td>Edit</td></tr><tr><td>Zone</td><td>Zone</td><td>Read</td></tr><tr><td>Zone</td><td>DNS</td><td>Edit</td></tr></table>
+        <table class="mini-t"><tr><td>Account</td><td>Cloudflare Tunnel</td><td>Edit</td></tr><tr><td>Zone</td><td>Zone</td><td>Read</td></tr><tr><td>Zone</td><td>DNS</td><td>Edit</td></tr><tr><td>Zone</td><td>Analytics</td><td>Read</td></tr></table>
         <p>Account Resources: your account · Zone Resources: All zones. <b>Test before saving</b> in the form checks it without changing anything.</p></div></div>`;
   },
   doneHtml(d) {
