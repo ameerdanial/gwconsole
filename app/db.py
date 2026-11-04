@@ -1,4 +1,4 @@
-"""SQLite storage for users (with preferences), sessions, settings, Cloudflare accounts, nodes, alerts and monitoring.
+"""SQLite storage for users (with preferences, scoped access and two-step sign-in), sessions, settings, Cloudflare accounts, nodes, alerts and monitoring.
 
 One file at /var/lib/gwconsole/gwconsole.db (WAL mode). The schema is versioned with
 PRAGMA user_version; MIGRATIONS[i] upgrades version i -> i+1 and runs exactly once.
@@ -160,6 +160,36 @@ MIGRATIONS = [
     ALTER TABLE users ADD COLUMN prefs TEXT NOT NULL DEFAULT '{}';
     ALTER TABLE sessions ADD COLUMN last_active INTEGER;
     UPDATE sessions SET last_active = last_seen;
+    """,
+    # 3 -> 4 : v1.5.0 — scoped access, two-step sign-in (TOTP), trusted browsers
+    """
+    ALTER TABLE users ADD COLUMN scope_mode TEXT NOT NULL DEFAULT 'all';
+    ALTER TABLE users ADD COLUMN scope_ver INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE user_scope (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind    TEXT NOT NULL CHECK (kind IN ('tunnel','domain','backend')),
+        ref     TEXT NOT NULL,
+        PRIMARY KEY (user_id, kind, ref)
+    );
+    ALTER TABLE users ADD COLUMN totp_secret TEXT;
+    ALTER TABLE users ADD COLUMN totp_pending TEXT;
+    ALTER TABLE users ADD COLUMN totp_on INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN totp_recovery TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE users ADD COLUMN totp_set_at INTEGER;
+    CREATE TABLE trusted_browsers (
+        token_hash TEXT PRIMARY KEY,
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        ip         TEXT,
+        user_agent TEXT
+    );
+    -- an install that already has users starts with two-step sign-in required for nobody (no lock-out on upgrade)
+    INSERT INTO settings (key, value) SELECT 'general', '{}'
+        WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'general') AND EXISTS (SELECT 1 FROM users);
+    UPDATE settings SET value = json_set(value, '$.twofa_required', 'nobody')
+        WHERE key = 'general' AND EXISTS (SELECT 1 FROM users);
     """,
 ]
 
