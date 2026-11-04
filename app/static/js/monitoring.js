@@ -10,19 +10,22 @@ PAGES.monitoring = {
   range: "24h",
   mount(v) {
     setHeader("Monitoring", "Sites, servers and services");
+    try { this.gtab = localStorage.getItem("gwc-mon-tab") || this.gtab || "rt"; } catch { this.gtab = this.gtab || "rt"; }
+    this.hidden = this.hidden || {};
     v.innerHTML = `<div class="row" style="justify-content:flex-end;gap:10px">
         <span class="sub" id="monWhen"></span><span class="grow"></span>
-        <span class="segs" id="monRange">${["1h", "6h", "24h", "7d"].map((r) => `<button data-r="${r}" class="${r === this.range ? "on" : ""}">${r === "7d" ? "7 days" : r}</button>`).join("")}</span>
         <button class="btn sm op" data-act="run">Check now</button></div>
       <div class="kpis" id="monKpi"></div>
       <div id="monErr"></div>
-      <div class="panel"><div class="hd"><h2>Sites</h2><span class="meta">Found automatically from your tunnels and HAProxy rules · public = through Cloudflare, internal = straight to the origin</span>
-        <div class="acts"><button class="btn sm op" data-act="addsite">+ Add a check</button></div></div>
-        <div class="bd flush tbl-wrap" id="monSites"><div class="empty">Loading…</div></div></div>
+      <div class="panel gpanel"><div class="hd"><h2>Graphs</h2><span class="meta" id="gMeta"></span>
+        <div class="acts"><span class="segs" id="monRange">${["1h", "6h", "24h", "7d"].map((r) => `<button data-r="${r}" class="${r === this.range ? "on" : ""}">${r === "7d" ? "7 days" : r}</button>`).join("")}</span></div></div>
+        <div class="gtabs" id="gTabs"></div><div class="chart" id="gChart"><div class="empty">Loading…</div></div><div class="gsumw" id="gSum"></div></div>
       <div class="panel"><div class="hd"><h2>Servers</h2><span class="meta">Gateways and your other servers · read over SSH</span>
         ${S.role === "superadmin" ? `<div class="acts"><a class="btn sm" href="#/settings/nodes">+ Add server</a></div>` : ""}</div>
         <div class="bd flush tbl-wrap" id="monServers"></div></div>
-      <div class="grid2" id="monCharts"></div>`;
+      <div class="panel"><div class="hd"><h2>Sites</h2><span class="meta">Found automatically from your tunnels and HAProxy rules · public = through Cloudflare, internal = straight to the origin</span>
+        <div class="acts"><button class="btn sm op" data-act="addsite">+ Add a check</button></div></div>
+        <div class="bd flush tbl-wrap" id="monSites"><div class="empty">Loading…</div></div></div>`;
     v.addEventListener("click", (e) => this.onClick(e));
   },
 
@@ -114,7 +117,7 @@ PAGES.monitoring = {
             <button class="op" title="Stop watching" data-act="unwatch" data-node="${esc(s.name)}" data-unit="${esc(w.unit)}">✕</button></span>${!ok && !unk ? `<button class="btn xs pri op" data-act="restart" data-node="${esc(s.name)}" data-unit="${esc(w.unit)}">Restart</button> ` : ""}`;
         }).join("");
         return `<tr><td><b>${esc(s.name)}</b><div class="sub mono">${esc(s.host)}</div></td><td><span class="tag">${type}</span></td>
-          ${stale || `<td>${this.bar(lp, cfg.load_factor * 50, cfg.load_factor * 100)}${load.toFixed(2)} <span class="sub">/ ${s.cores} cores</span></td>
+          ${stale || `<td>${this.bar(lp, cfg.load_factor * 50, cfg.load_factor * 100)}${load.toFixed(2)} <span class="sub">/ ${fmt.plural(s.cores || 1, "core")}</span></td>
           <td>${this.bar(s.mem_pct, cfg.mem_crit - 15, cfg.mem_crit)}${fmt.pct(s.mem_pct, 0)}${s.mem_total ? ` <span class="sub">of ${fmt.bytes(s.mem_total)}</span>` : ""}</td>
           <td>${f.pct != null ? `${this.bar(f.pct, cfg.disk_warn, cfg.disk_crit)}<span style="${f.pct >= cfg.disk_warn ? "color:var(--warn);font-weight:600" : ""}">${fmt.pct(f.pct, 0)}</span> <span class="sub">${esc(f.mount)}</span>` : "–"}</td>
           <td>${fmt.dur(s.uptime)}</td>`}
@@ -122,39 +125,63 @@ PAGES.monitoring = {
       }).join("")}</tbody></table>` : `<div class="empty">No nodes yet.</div>`;
   },
 
-  async charts(d) {
-    const r = this.range;
-    const pubSites = d.sites.filter((s) => !s.excluded && s.state.pub).sort((a, b) => (b.state.pub.ms || 0) - (a.state.pub.ms || 0)).slice(0, 4);
-    const mem = [...d.servers].filter((s) => s.mem_pct != null).sort((a, b) => b.mem_pct - a.mem_pct).slice(0, 4);
-    const load = [...d.servers].filter((s) => s.load).sort((a, b) => b.load[0] / b.cores - a.load[0] / a.cores).slice(0, 4);
-    const disk = [...d.servers].filter((s) => s.fullest).sort((a, b) => b.fullest.pct - a.fullest.pct).slice(0, 4);
+  /** The graph tabs (option A): one large graph per metric, a Now / Average / Peak table under it,
+   *  at most 4 lines (the palette has 4 colours); click a row to show or hide its line. */
+  graphDefs(d) {
+    const pub = d.sites.filter((s) => !s.excluded && s.state.pub).sort((a, b) => (b.state.pub.ms || 0) - (a.state.pub.ms || 0));
+    const srv = d.servers.filter((s) => s.at && !s.error);
     const be = d.top_backends || [];
-    const defs = [
-      { id: "c-rt", title: "Response time — public", meta: "per site", names: pubSites.map((s) => [`site.pub.ms:${s.host}`, s.host]), yFmt: fmt.ms },
-      { id: "c-mem", title: "Memory used", meta: "% per server", names: mem.map((s) => [`srv.mem:${s.name}`, s.name]), yFmt: (v) => fmt.pct(v, 0), yMax: 100 },
-      { id: "c-load", title: "CPU load", meta: "1-minute load average", names: load.map((s) => [`srv.load:${s.name}`, s.name]), yFmt: (v) => v.toFixed(2), minMax: 1 },
-      { id: "c-disk", title: "Disk (fullest)", meta: "% used", names: disk.map((s) => [`srv.disk:${s.name}`, s.name]), yFmt: (v) => fmt.pct(v, 0), yMax: 100 },
-      { id: "c-req", title: "Requests — HAProxy backends", meta: "per minute", names: be.map((n) => [`hp.req:${n}`, n.replace("/be:", " / ")]), yFmt: (v) => fmt.k(v), minMax: 4 },
-      { id: "c-5xx", title: "5xx errors — HAProxy backends", meta: "per minute", names: be.map((n) => [`hp.5xx:${n}`, n.replace("/be:", " / ")]), yFmt: (v) => fmt.k(v), minMax: 4 },
-      { id: "c-conn", title: "Connections", meta: "HAProxy, peak per minute", names: (d.hp_nodes || []).slice(0, 4).map((n) => [`hp.conn:${n}`, n]), yFmt: (v) => fmt.k(v), minMax: 4 },
-    ].filter((c) => c.names.length);
-    const box = $("#monCharts");
-    if (!box) return;
-    const keep = box.dataset.sig === JSON.stringify(defs.map((c) => [c.id, c.names]));
-    if (!keep) {
-      box.dataset.sig = JSON.stringify(defs.map((c) => [c.id, c.names]));
-      box.innerHTML = defs.map((c) => `<div class="panel"><div class="hd"><h2>${esc(c.title)}</h2><span class="meta">${esc(c.meta)}</span></div><div class="chart" id="${c.id}"></div></div>`).join("");
-    }
-    const all = defs.flatMap((c) => c.names.map((n) => n[0]));
-    if (!all.length) return;
-    const s = await api(`/api/monitor/series?range=${r}&names=${encodeURIComponent(all.join(","))}`);
-    if (S.page !== "monitoring") return;
+    const per = (cores) => (cores ? ` / ${cores} core${cores === 1 ? "" : "s"}` : "");
+    return [
+      { id: "rt", grp: "Sites", t: "Response time", meta: "public, through Cloudflare · slowest first", what: "Site", names: pub.map((s) => [`site.pub.ms:${s.host}`, s.host]), yFmt: fmt.ms },
+      { id: "cpu", grp: "Servers", t: "CPU load", meta: "1-minute load average per server", what: "Server", names: srv.filter((s) => s.load).map((s) => [`srv.load:${s.name}`, s.name, per(s.cores)]), yFmt: (v) => v.toFixed(2), minMax: 1 },
+      { id: "mem", grp: "Servers", t: "Memory", meta: "% used per server", what: "Server", names: srv.filter((s) => s.mem_pct != null).map((s) => [`srv.mem:${s.name}`, s.name]), yFmt: (v) => fmt.pct(v, 0), yMax: 100, warn: d.settings.mem_crit - 15 },
+      { id: "disk", grp: "Servers", t: "Disk", meta: "fullest disk, % used", what: "Server", names: srv.filter((s) => s.fullest).map((s) => [`srv.disk:${s.name}`, s.name]), yFmt: (v) => fmt.pct(v, 0), yMax: 100, warn: d.settings.disk_warn },
+      { id: "req", grp: "HAProxy", t: "Requests", meta: "per minute, per HAProxy backend", what: "Backend", names: be.map((n) => [`hp.req:${n}`, n.replace("/be:", " / ")]), yFmt: (v) => fmt.k(v), minMax: 4 },
+      { id: "e5", grp: "HAProxy", t: "5xx errors", meta: "per minute, per HAProxy backend", what: "Backend", names: be.map((n) => [`hp.5xx:${n}`, n.replace("/be:", " / ")]), yFmt: (v) => fmt.k(v), minMax: 4, warn: 1 },
+      { id: "conn", grp: "HAProxy", t: "Connections", meta: "peak per minute, per HAProxy node", what: "Node", names: (d.hp_nodes || []).map((n) => [`hp.conn:${n}`, n]), yFmt: (v) => fmt.k(v), minMax: 4 },
+    ];
+  },
+
+  async charts(d) {
+    const defs = this.graphDefs(d);
+    const avail = defs.filter((c) => c.names.length);
+    if (!avail.find((c) => c.id === this.gtab)) this.gtab = (avail[0] || defs[0]).id;
+    const c = defs.find((x) => x.id === this.gtab);
+    let last = "";
+    $("#gTabs").innerHTML = defs.map((x) => {
+      const g = x.grp !== last ? `<span class="g">${x.grp}</span>` : "";
+      last = x.grp;
+      return `${g}<button type="button" data-gt="${x.id}" class="${x.id === c.id ? "on" : ""}" ${x.names.length ? "" : "disabled title=\"nothing to show yet\""}>${x.t}</button>`;
+    }).join("");
+    $("#gMeta").textContent = c.meta;
+    const tb = $("#gTabs"), on = $("#gTabs .on");   // keep the chosen tab visible on phones, without scrolling the page
+    if (on && (on.offsetLeft < tb.scrollLeft || on.offsetLeft + on.offsetWidth > tb.scrollLeft + tb.clientWidth)) tb.scrollLeft = on.offsetLeft - 24;
+    const box = $("#gChart");
+    if (!c.names.length) { box.innerHTML = `<div class="empty">Nothing to show yet — history builds up as checks run.</div>`; $("#gSum").innerHTML = ""; return; }
+    const r = this.range;
+    const s = await api(`/api/monitor/series?range=${r}&names=${encodeURIComponent(c.names.map((n) => n[0]).join(","))}`);
+    if (S.page !== "monitoring" || this.gtab !== c.id) return;
+    const rows = c.names.map(([k, label, extra]) => {
+      const pts = (s.series[k] || []).map((p) => p[1]);
+      return { k, label, extra: extra || "", data: s.series[k] || [], now: pts.length ? pts[pts.length - 1] : null,
+        avg: pts.length ? pts.reduce((a, b) => a + b, 0) / pts.length : null, peak: pts.length ? Math.max(...pts) : null };
+    });
+    // the busiest first; the first 4 are drawn unless the user picked others
+    rows.sort((a, b) => (c.id === "e5" ? (b.peak ?? -1) - (a.peak ?? -1) : (b.now ?? -1) - (a.now ?? -1)));
+    const pick = this.hidden[c.id];
+    const shown = pick ? rows.filter((x) => pick.includes(x.k)) : rows.slice(0, 4);
     const span = { "1h": 3600, "6h": 21600, "24h": 86400, "7d": SEVEN }[r];
-    const xFmt = r === "7d" ? (t) => new Date(t * 1000).toLocaleDateString([], { weekday: "short" }) : undefined;
-    for (const c of defs) {
-      const el = $(`#${c.id}`);
-      if (el) Charts.line(el, c.names.map(([k, label]) => ({ name: label, data: s.series[k] || [] })), { yFmt: c.yFmt, yMax: c.yMax, minMax: c.minMax, xFmt, legend: true, gap: span / 20, span });
-    }
+    const xFmt = r === "7d" ? (t) => fmt.wd(t) : undefined;
+    Charts.line(box, shown.map((x) => ({ name: x.label, data: x.data })), { yFmt: c.yFmt, yMax: c.yMax, minMax: c.minMax, xFmt, legend: true, gap: span / 20, span, h: 300 });
+    const hi = (v) => (c.warn != null && v != null && v >= c.warn ? " hi" : "");
+    const v = (x) => (x == null ? "–" : c.yFmt(x));
+    $("#gSum").innerHTML = `<table class="gsum"><thead><tr><th>${c.what}</th><th class="num">Now</th><th class="num avg">Average</th><th class="num">Peak</th></tr></thead><tbody>
+      ${rows.map((x) => { const i = shown.indexOf(x); return `<tr data-gk="${esc(x.k)}" class="${i < 0 ? "off" : ""}" title="${i < 0 ? "Show" : "Hide"} this line">
+        <td><i style="${i < 0 ? "" : `background:${Charts.color(i, x.label)}`}"></i>${esc(x.label)}<span class="sub">${esc(x.extra)}</span></td>
+        <td class="num${hi(x.now)}">${v(x.now)}</td><td class="num avg">${v(x.avg)}</td><td class="num${hi(x.peak)}">${v(x.peak)}</td></tr>`; }).join("")}</tbody></table>
+      <div class="sub gcap">${rows.length > 4 ? `Showing ${shown.length} of ${rows.length} on the graph (up to 4) · ` : ""}click a row to show or hide its line</div>`;
+    this._rows = rows; this._shown = shown.map((x) => x.k);
   },
 
   async onClick(e) {
@@ -162,6 +189,20 @@ PAGES.monitoring = {
     if (rb) {
       this.range = rb.dataset.r;
       $$("#monRange button").forEach((b) => b.classList.toggle("on", b === rb));
+      return this.charts(S.cache.mon);
+    }
+    const gt = e.target.closest("#gTabs button[data-gt]");
+    if (gt) {
+      this.gtab = gt.dataset.gt;
+      try { localStorage.setItem("gwc-mon-tab", this.gtab); } catch { /* private mode */ }
+      return this.charts(S.cache.mon);
+    }
+    const gr = e.target.closest("#gSum tr[data-gk]");
+    if (gr) {
+      const k = gr.dataset.gk;
+      let cur = [...(this._shown || [])];
+      if (cur.includes(k)) { if (cur.length > 1) cur = cur.filter((x) => x !== k); } else { cur.push(k); if (cur.length > 4) cur.shift(); }
+      this.hidden[this.gtab] = cur;
       return this.charts(S.cache.mon);
     }
     const b = e.target.closest("[data-act]");
@@ -258,7 +299,7 @@ PAGES.monitoring = {
       const names = [`site.pub.ms:${host}`, `site.int.ms:${host}`];
       const d = await api(`/api/monitor/series?range=${rg}&names=${encodeURIComponent(names.join(","))}`);
       Charts.line($("[data-ch]", f), [{ name: "public", data: d.series[names[0]] }, { name: "internal", data: d.series[names[1]] }].filter((x) => x.data.length),
-        { yFmt: fmt.ms, h: 180, legend: true, span: { "1h": 3600, "24h": 86400, "7d": SEVEN }[rg], gap: { "1h": 300, "24h": 3600, "7d": 21600 }[rg], xFmt: rg === "7d" ? (t) => new Date(t * 1000).toLocaleDateString([], { weekday: "short" }) : undefined });
+        { yFmt: fmt.ms, h: 180, legend: true, span: { "1h": 3600, "24h": 86400, "7d": SEVEN }[rg], gap: { "1h": 300, "24h": 3600, "7d": 21600 }[rg], xFmt: rg === "7d" ? (t) => fmt.wd(t) : undefined });
       return side;
     };
     f.addEventListener("click", async (e) => {
