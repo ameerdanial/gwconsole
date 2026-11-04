@@ -32,7 +32,7 @@ const Charts = {
     const t0 = opts.span ? t1 - opts.span : Math.min(...pts.map((p) => p[0]));
     const yMax = opts.yMax || this.niceMax(Math.max(opts.minMax || 0, ...pts.map((p) => p[1])) * 1.1);
     const yFmt = opts.yFmt || ((v) => fmt.n(Math.round(v)));
-    const xFmt = opts.xFmt || ((t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    const xFmt = opts.xFmt || ((t) => fmt.clock(t));
     const x = (t) => pad.l + (t1 === t0 ? iw / 2 : ((t - t0) / (t1 - t0)) * iw);
     const y = (v) => pad.t + ih - (Math.min(v, yMax) / yMax) * ih;
     let s = `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="display:block">`;
@@ -69,7 +69,7 @@ const Charts = {
       if (!rows.length) return;
       const tt = rows[0].t;
       xh.setAttribute("x1", x(tt)); xh.setAttribute("x2", x(tt)); xh.setAttribute("visibility", "visible");
-      tip.innerHTML = `<div class="tt">${esc(new Date(tt * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }))}</div>`
+      tip.innerHTML = `<div class="tt">${esc(`${fmt.wd(tt)} ${fmt.date(tt, { year: false })}, ${fmt.clock(tt)}`)}</div>`
         + rows.sort((a, b) => b.v - a.v).map((r) => `<div class="r"><span><i style="background:${this.color(r.i, r.name)}"></i>${esc(r.name)}</span><b>${esc(yFmt(r.v))}</b></div>`).join("");
       tip.classList.remove("hidden");
       const left = (x(tt) / w) * r.width;
