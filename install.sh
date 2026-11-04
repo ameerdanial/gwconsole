@@ -294,6 +294,7 @@ case "${1:-}" in
     echo "gwconsole $(cat $APP/VERSION 2>/dev/null)   $(systemctl is-active gwconsole 2>/dev/null)   $(url)" ;;
   create-admin)   need_root; shift; run create-admin "$@" ;;
   reset-password) need_root; [ -n "${2:-}" ] || { echo "usage: gwconsole reset-password <user>"; exit 1; }; shift; run reset-password "$@" ;;
+  reset-2fa) need_root; [ -n "${2:-}" ] || { echo "usage: gwconsole reset-2fa <user>"; exit 1; }; shift; run reset-2fa "$@" ;;
   users)  need_root; run users ;;
   check)  need_root; run check ;;
   hashpw) run hashpw ;;
@@ -312,7 +313,8 @@ case "${1:-}" in
     rm -f "$tmp" ;;
   upgrade)
     need_root; shift; want=""; yes=0
-    for a in "$@"; do case "$a" in -y|--yes) yes=1 ;; v*) want=$a ;; *) echo "usage: gwconsole upgrade [vX.Y.Z] [--yes]"; exit 1 ;; esac; done
+    force=0
+    for a in "$@"; do case "$a" in -y|--yes) yes=1 ;; --force) force=1 ;; v*) want=$a ;; *) echo "usage: gwconsole upgrade [vX.Y.Z] [--yes] [--force]"; exit 1 ;; esac; done
     SRC=$(cat $APP/SOURCE 2>/dev/null || true)
     [ -n "$SRC" ] && [ -d "$SRC/.git" ] || { echo "installed from a tarball (no git clone recorded). Download the new release and run its install.sh."; exit 1; }
     [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no)" ] || { echo "$SRC has local changes — commit or 'git -C $SRC stash' them first"; exit 1; }
@@ -326,6 +328,15 @@ case "${1:-}" in
     if [ "$(printf '%s\n%s\n' "$cur" "$want" | sort -V | tail -1)" = "$cur" ]; then
       echo "note: $want is OLDER than $cur. Its database may not understand newer data;"
       echo "      to really go back, restore the matching backup from /var/backups/gwconsole."
+      # versions before 1.5.0 don't know scoped access: limited users would get everything their role allows
+      if [ "$(printf '%s\n%s\n' "$want" v1.5.0 | sort -V | head -1)" = "$want" ] && [ "$want" != v1.5.0 ]; then
+        scoped=$($APP/venv/bin/python -c "import sqlite3,sys; c=sqlite3.connect('file:$VAR/gwconsole.db?mode=ro',uri=True); print(', '.join(r[0] for r in c.execute(\"SELECT username FROM users WHERE scope_mode='pick'\")))" 2>/dev/null || true)
+        if [ -n "$scoped" ] && [ $force = 0 ]; then
+          echo "refusing: $want doesn't know scoped access, so these limited users would get everything their role allows: $scoped"
+          echo "set them to Everything (or remove them) first, or add --force if you really mean it."
+          exit 1
+        fi
+      fi
     fi
     echo; echo "installed: $cur    →    $want"; echo
     git -C "$SRC" show "$want:CHANGELOG.md" 2>/dev/null | awk -v v="${want#v}" '
@@ -335,8 +346,9 @@ case "${1:-}" in
     git -C "$SRC" -c advice.detachedHead=false checkout --quiet "$want"
     exec bash "$SRC/install.sh" --upgrade ;;
   backup)  need_root; shift; cd $APP; GWC_CONFIG=$ETC/config.yaml exec $APP/venv/bin/python -m app backup "$@" ;;
-  restore) need_root; [ -n "${2:-}" ] || { echo "usage: gwconsole restore <backup file>"; ls -1t /var/backups/gwconsole/*.tar.gz 2>/dev/null | head -5; exit 1; }
-           cd $APP; GWC_CONFIG=$ETC/config.yaml exec $APP/venv/bin/python -m app restore "$(readlink -f "$2")" ;;
+  restore) need_root; [ -n "${2:-}" ] || { echo "usage: gwconsole restore <backup file> [--by <user>]"; ls -1t /var/backups/gwconsole/*.tar.gz 2>/dev/null | head -5; exit 1; }
+           f=$(realpath -s "$2"); shift 2
+           cd $APP; GWC_CONFIG=$ETC/config.yaml exec $APP/venv/bin/python -m app restore "$f" "$@" ;;
   allow-all) need_root; run allow-all ;;
   helper)  need_root; shift; exec $APP/venv/bin/python -I $APP/app/helper.py "$@" ;;
   logs)    exec journalctl -u gwconsole -f ;;
@@ -347,11 +359,12 @@ usage: gwconsole <command>
   upgrade [vX.Y.Z] [-y]    fetch new versions, show what's new, back up and upgrade
   create-admin [user]      create a superadmin (locked out?)
   reset-password <user>    set a new password (also re-enables the account)
+  reset-2fa <user>         turn off a user's two-step sign-in (lost phone)
   users                    list users and roles
   check                    test SSH to every node and every Cloudflare token
   pubkey                   print the dashboard's SSH public key (for prepare-node.sh)
   backup                   back up settings, keys and the database now (/var/backups/gwconsole)
-  restore <file>           put a backup back (asks for the passphrase of a downloaded one)
+  restore <file>           put a backup back (asks for the passphrase of a downloaded one); rolls back if it won't start
   allow-all                remove the "allowed networks" sign-in restriction (locked out?)
   logs | restart | version
 USAGE
