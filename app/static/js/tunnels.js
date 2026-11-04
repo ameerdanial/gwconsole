@@ -38,7 +38,7 @@ PAGES.tunnels = {
     $("#tunAcc").innerHTML = accErr.length ? `<div class="panel"><div class="bd">${accErr.map(([n, a]) => `<div>${pill("warn", "CF API")} <b>${esc(n)}</b> <span class="muted">${esc(a.error)}</span></div>`).join("")}</div></div>` : "";
     const nodes = d.nodes.map((n) => n.node);
     $("#tunNew").innerHTML = nodes.length === 1 ? `<button class="btn sm pri op" data-act="new" data-node="${esc(nodes[0])}">+ New tunnel</button>`
-      : nodes.length ? `<span class="more"><button class="btn sm pri op" data-act="newpick" style="color:#fff">+ New tunnel ▾</button></span>` : "";
+      : nodes.length ? `<span class="kebab"><button class="btn sm pri op" data-act="newpick" style="color:#fff">+ New tunnel ▾</button></span>` : "";
     const fill = (sel, label, vals, cur) => { sel.innerHTML = `<option value="">${label}: all</option>` + vals.map((x) => `<option ${x === cur ? "selected" : ""}>${esc(x)}</option>`).join(""); };
     fill($("#tunNode"), "Node", nodes, this.fnode);
     fill($("#tunAccSel"), "Account", [...new Set(this.all().map((x) => x.t.cf_account).filter(Boolean))], this.facc);
@@ -143,7 +143,7 @@ PAGES.tunnels = {
           <td>${t.remote ? `<span class="sub">Zero Trust</span>` : x.hosts.length}${x.dnsBad ? ` <span class="issue">· ${x.dnsBad} DNS</span>` : ""}${x.down ? ` <span class="issue" style="color:var(--crit)">· ${x.down} down</span>` : ""}</td>
           <td class="num" style="white-space:nowrap"><span style="margin-right:8px">${fmt.k(t.requests_today || 0)}</span>${Charts.spark(t.requests_week, { w: 70, h: 20 })}</td>
           <td>${t.service.active === "active" ? this.upFor(t.service.since) : pill(svcClass(t.service.active), t.service.active)}</td>
-          <td><span class="more"><button data-act="tmenu" data-ref="${this.ref(x)}">⋯</button></span></td></tr>`;
+          <td><span class="kebab"><button data-act="tmenu" data-ref="${this.ref(x)}">⋯</button></span></td></tr>`;
       }).join("")}</tbody></table>` : `<div class="empty">${this.q || this.attention || this.fnode || this.facc ? "No tunnels match." : "No cloudflared services found yet."}</div>`}</div></div>
       ${cur ? this.panel(cur) : ""}</div>`;
   },
@@ -169,7 +169,7 @@ PAGES.tunnels = {
     return `<button class="btn xs ${dr.status === "missing" ? "pri" : ""} op" data-act="dns" data-ref="${this.ref(x)}" data-host="${esc(dr.hostname)}">${dr.status === "missing" ? "Create route" : "Fix route"}</button>`;
   },
   moreBtn(x, r) {
-    return `<span class="more"><button data-act="hmenu" data-ref="${this.ref(x)}" data-host="${esc(r.hostname)}" data-path="${esc(r.path || "")}">⋯</button></span>`;
+    return `<span class="kebab"><button data-act="hmenu" data-ref="${this.ref(x)}" data-host="${esc(r.hostname)}" data-path="${esc(r.path || "")}">⋯</button></span>`;
   },
   routeLine(r) {
     const rt = r.route || {};
@@ -194,7 +194,7 @@ PAGES.tunnels = {
         }).join("") || `<tr><td colspan="4" class="empty">No ingress rules.</td></tr>`}</tbody></table>
         ${(t.dns?.orphans || []).map((o) => `<div class="small">${pill("warn", "orphan DNS")} <span class="muted"><b>${esc(o)}</b> points here but has no rule — visitors get the catch-all.</span>
           <button class="btn xs op" data-act="orphdel" data-ref="${ref}" data-host="${esc(o)}">Delete record</button> <button class="btn xs op" data-act="orphadd" data-ref="${ref}" data-host="${esc(o)}">Add a rule</button></div>`).join("")}`;
-      body += `<div class="mini"><div><div class="l">Account</div><div class="v">${esc(t.cf_account || "—")}</div></div>
+      body += `<div class="mcards"><div><div class="l">Account</div><div class="v">${esc(t.cf_account || "—")}</div></div>
         <div><div class="l">Connections</div><div class="v">${conns.length} · ${esc([...new Set(conns.map((c) => c.colo))].join(" ") || "none")}</div></div>
         <div><div class="l">Running since</div><div class="v" title="${esc(t.service.since)}">${esc((t.service.since || "–").replace(/^\w{3} /, "").replace(/:\d\d [+-]\d+$/, "").replace(/ [A-Z]{2,5}$/, ""))}</div></div></div>`;
     } else if (this.ptab === "conns") {
