@@ -44,7 +44,7 @@ PAGES.haproxy = {
         <td class="num">${fmt.n(f.scur)} <span class="sub">/ ${fmt.n(f.slim)}</span></td><td class="num">${fmt.n(f.rate)}</td><td class="num">${f.mode === "http" ? fmt.n(f.req_rate) : "–"}</td>
         <td class="num">${fmt.bytes(f.bin)}</td><td class="num">${fmt.bytes(f.bout)}</td>
         <td class="num">${fmt.n(f.hrsp_2xx)}</td><td class="num">${fmt.n(f.hrsp_4xx)}</td><td class="num">${fmt.n(f.hrsp_5xx)}</td><td class="num">${fmt.n(f.ereq)}</td>
-        <td class="op"><button class="btn xs" data-act="edit-fe" data-name="${esc(f.name)}">Edit</button></td></tr>`).join("")}</tbody></table>`
+        <td class="op"><button class="btn xs" data-act="edit-fe" data-name="${esc(f.name)}">${d.scoped ? "Edit my rules" : "Edit"}</button></td></tr>`).join("")}</tbody></table>`
       : `<div class="empty">No frontends.</div>`;
     this.renderBe(d);
   },
@@ -59,26 +59,26 @@ PAGES.haproxy = {
     const req = +(i.CumReq || 0), e5 = sum("hrsp_5xx"), tot = sum("hrsp_2xx") + sum("hrsp_3xx") + sum("hrsp_4xx") + e5;
     const conn = +(i.CurrConns || 0), max = +(i.Maxconn || 0), pct = max ? (conn / max) * 100 : 0;
     const ver = String(i.Version || "–"), vMain = ver.split("-")[0], vPkg = ver.includes("-") ? ver.slice(ver.indexOf("-") + 1) : "";
-    const since = sv.since_epoch ? new Date(sv.since_epoch * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : (sv.since || "–");
+    const since = sv.since_epoch ? `${fmt.wd(sv.since_epoch)} ${fmt.short(sv.since_epoch)}` : (sv.since || "–");
     const up = sv.since_epoch ? Math.max(0, Math.round(Date.now() / 1000 - sv.since_epoch)) : +i.Uptime_sec;
     return `<div class="hd"><h2>${esc(d.node)}</h2><span class="meta mono">${esc(d.host)}</span>${d.site ? `<span class="tag">${esc(d.site)}</span>` : ""}${pill(svcClass(sv.active), sv.active)}
-        <div class="acts"><button class="btn sm" data-act="logs">Logs</button><button class="btn sm" data-act="edit">Edit config</button>
+        ${d.scoped ? "" : `<div class="acts"><button class="btn sm" data-act="logs">Logs</button><button class="btn sm" data-act="edit">Edit config</button>
         <button class="btn sm pri op" data-act="add">+ Add</button>
-        <button class="btn sm op" data-act="svc" data-a="reload">Reload</button><button class="btn sm danger op" data-act="svc" data-a="restart">Restart</button></div></div>
+        <button class="btn sm op" data-act="svc" data-a="reload">Reload</button><button class="btn sm danger op" data-act="svc" data-a="restart">Restart</button></div>`}</div>
       <div class="tiles">
         <div class="tile"><div class="l">Service</div><div class="v">${sv.active === "active" ? fmt.dur(up) : esc(sv.active)}${sv.active === "active" ? " <small>up</small>" : ""}</div>
           <div class="s">since ${esc(since)}</div><div class="s">${sv.restarts != null ? `${sv.restarts} automatic restart${sv.restarts === 1 ? "" : "s"}` : ""}</div></div>
         <div class="tile"><div class="l">Backends</div><div class="v ${beUp === be.length ? "okc" : "critc"}">${beUp}<small> / ${be.length} up</small></div>
           <div class="chips">${pill("ok", `${sUp} server${sUp === 1 ? "" : "s"} up`)}${sMaint ? pill("warn", `${sMaint} drain/maint`) : ""}${sDown ? pill("crit", `${sDown} down`) : ""}</div></div>
-        <div class="tile"><div class="l">Connections</div><div class="v">${fmt.n(conn)} <small>/ ${fmt.n(max)}</small></div>
+        ${d.scoped ? "" : `<div class="tile"><div class="l">Connections</div><div class="v">${fmt.n(conn)} <small>/ ${fmt.n(max)}</small></div>
           <div class="meter ${pct > 80 ? "crit" : pct > 60 ? "warn" : ""}"><i style="width:${Math.min(100, Math.max(pct, conn ? 1 : 0)).toFixed(1)}%"></i></div><div class="s">${pct.toFixed(pct < 1 ? 2 : 0)}% of maxconn</div></div>
         <div class="tile"><div class="l">Rates now</div><div class="mini3"><b>${fmt.n(i.ConnRate)}</b><b>${fmt.n(i.SessRate)}</b><b>${fmt.n(sum("req_rate"))}</b><span>conn/s</span><span>sess/s</span><span>req/s</span></div></div>
         <div class="tile"><div class="l">Traffic</div><div class="v">${fmt.n(req)} <small>requests</small></div>
           <div class="s">↓ ${fmt.bytes(sum("bin"))} in · ↑ ${fmt.bytes(sum("bout"))} out</div><div class="s">5xx: ${fmt.n(e5)}${tot ? ` (${((e5 / tot) * 100).toFixed(e5 && e5 / tot < 0.01 ? 2 : 1)}%)` : ""}</div></div>
         <div class="tile"><div class="l">HAProxy</div><div class="v">${esc(vMain)}</div><div class="s">${vPkg ? `package ${esc(vPkg)}` : esc(i.Release_date || "")}</div>
-          <div class="s">${esc(i.Nbthread || "–")} thread${i.Nbthread === "1" ? "" : "s"} · CPU idle ${i.Idle_pct != null ? esc(i.Idle_pct) + "%" : "–"}</div></div>
+          <div class="s">${esc(i.Nbthread || "–")} thread${i.Nbthread === "1" ? "" : "s"} · CPU idle ${i.Idle_pct != null ? esc(i.Idle_pct) + "%" : "–"}</div></div>`}
       </div>
-      ${d.stats_error ? `<div class="bd"><div class="out bad">${esc(d.stats_error)}</div>
+      ${d.stats_error && !d.scoped ? `<div class="bd"><div class="out bad">${esc(d.stats_error)}</div>
         <div class="row op" style="margin-top:8px"><button class="btn sm pri" data-act="fixsock">Set up the stats socket for me</button>
         <span class="muted small">validated, backed up, rolled back on error</span></div></div>` : ""}`;
   },
@@ -90,8 +90,8 @@ PAGES.haproxy = {
       const up = b.servers.filter((s) => srvClass(s.status) === "ok").length;
       return `<tr class="be-row"><td>${esc(b.name)}</td><td>${pill(srvClass(b.status), b.status)}</td><td colspan="2" class="sub">${up}/${b.servers.length} servers up · ${esc(b.mode)}</td>
           <td class="num">${fmt.n(b.scur)}</td><td class="num">${fmt.n(b.rate)}</td><td class="num">${fmt.bytes(b.bin)} / ${fmt.bytes(b.bout)}</td><td class="num">${fmt.n(b.hrsp_5xx)}</td>
-          <td><div class="row op" style="flex-wrap:nowrap;gap:4px;justify-content:flex-end"><button class="btn xs" data-act="add-srv" data-name="${esc(b.name)}">+ server</button>
-            <button class="btn xs" data-act="edit-be" data-name="${esc(b.name)}">Edit</button><button class="btn xs danger" data-act="del-be" data-name="${esc(b.name)}">Delete</button></div></td></tr>` +
+          <td>${b.locked ? `<span class="lockt" title="Other sites also use this backend, so it's read-only for you">🔒 shared · read only</span>` : `<div class="row op" style="flex-wrap:nowrap;gap:4px;justify-content:flex-end"><button class="btn xs" data-act="add-srv" data-name="${esc(b.name)}">+ server</button>
+            <button class="btn xs" data-act="edit-be" data-name="${esc(b.name)}">Edit</button><button class="btn xs danger" data-act="del-be" data-name="${esc(b.name)}">Delete</button></div>`}</td></tr>` +
         servers.map((s) => {
           const st = s.status.includes("MAINT") ? "maint" : s.status === "DRAIN" || s.status.includes("DRAIN") ? "drain" : "ready";
           return `<tr><td style="padding-left:28px">${esc(s.name)}${s.backup ? ` <span class="tag">backup</span>` : ""}<div class="sub mono">${esc(s.addr)}</div></td>
@@ -101,8 +101,8 @@ PAGES.haproxy = {
             <td><span class="mono small">${esc(s.check_status || "–")}</span>${s.check_duration != null ? ` <span class="sub">${s.check_duration}ms</span>` : ""}<div class="sub">${esc(s.check_desc || "")}</div></td>
             <td class="sub">changed ${fmt.dur(s.lastchg)} ago${s.chkfail ? ` · ${s.chkfail} fails` : ""}</td>
             <td class="num">${fmt.n(s.scur)}</td><td class="num">${fmt.n(s.rate)}</td><td class="num">${fmt.bytes(s.bin)} / ${fmt.bytes(s.bout)}</td><td class="num">${fmt.n(s.hrsp_5xx)}</td>
-            <td><div class="row" style="flex-wrap:nowrap;gap:6px;justify-content:flex-end"><div class="seg op">${["ready", "drain", "maint"].map((x) => `<button class="${x} ${st === x ? "on" : ""}" data-act="srv" data-be="${esc(b.name)}" data-srv="${esc(s.name)}" data-st="${x}" data-kept="${esc(s.kept || "")}">${x}</button>`).join("")}</div>
-              <button class="ib rm op" title="Remove ${esc(s.name)} from haproxy.cfg" data-act="rm-srv" data-be="${esc(b.name)}" data-srv="${esc(s.name)}">✕</button></div></td></tr>`;
+            <td>${b.locked ? "" : `<div class="row" style="flex-wrap:nowrap;gap:6px;justify-content:flex-end"><div class="seg op">${["ready", "drain", "maint"].map((x) => `<button class="${x} ${st === x ? "on" : ""}" data-act="srv" data-be="${esc(b.name)}" data-srv="${esc(s.name)}" data-st="${x}" data-kept="${esc(s.kept || "")}">${x}</button>`).join("")}</div>
+              <button class="ib rm op" title="Remove ${esc(s.name)} from haproxy.cfg" data-act="rm-srv" data-be="${esc(b.name)}" data-srv="${esc(s.name)}">✕</button></div>`}</td></tr>`;
         }).join("");
     }).join("");
     $("#hpBe").innerHTML = rows ? `<table><thead><tr><th>Backend / server</th><th>Status</th><th>Check</th><th>Last change</th><th class="num">Sess</th><th class="num">Rate/s</th><th class="num">In / out</th><th class="num">5xx</th><th>State</th></tr></thead><tbody>${rows}</tbody></table>`
