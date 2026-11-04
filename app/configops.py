@@ -6,7 +6,6 @@ and automatic rollback to the backup if activate or the health check fails.
 from __future__ import annotations
 
 import asyncio
-
 import difflib
 import hashlib
 import re
