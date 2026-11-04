@@ -19,17 +19,20 @@ alert and can message you on Telegram or Discord.
 
 ![Overview](docs/overview.png)
 
+Your name at the bottom of the menu opens **My account**, Preferences, Signed-in browsers, What's new and Sign out. The footer shows the version and whether it's up to date.
+
 ## What it does
 
 | Page | See | Do |
 |---|---|---|
-| **Overview** | KPIs, active alerts, node and tunnel cards | — |
+| **Overview** | Tiles for sites, servers, backend servers, tunnels, today's requests and alerts; what needs attention; sites with response times; today's traffic per hour; server CPU / memory / disk; every HAProxy backend's servers and every tunnel's edge connections | — |
 | **Monitoring** | Every public hostname checked every minute, publicly (through Cloudflare) and internally (straight to the origin): status, response time, uptime 24 h / 7 days, certificate expiry. Every server's CPU load, memory, fullest disk, uptime and watched services. Graphs over 1 h – 7 days | **+ Add a check**, per-site options (path, expected status, keyword, slow limit, don't check), watch a service, **Restart** a stopped one, check now |
 | **Traffic** | Per site from Cloudflare: requests, visitors, bandwidth, cache share, 4xx/5xx, threats, countries. Per HAProxy frontend/backend: requests, data, 4xx/5xx, busiest hour. Today / 7 / 30 days / 12 months vs the previous period | Export CSV, refresh from Cloudflare |
 | **CF Tunnels** | Every cloudflared tunnel (auto-discovered) with its edge connections, hostnames and today's requests; a detail panel shows each hostname's full route (cloudflared → HAProxy frontend → backend → servers up), its DNS state and whether the site is up. A **Hostnames** tab lists every public hostname end to end. Tunnels in your accounts that run nowhere you manage | **New tunnel**, **delete tunnel**, **add / remove hostname**, start / stop / restart, logs, test a URL, create/fix DNS route, delete orphan DNS records, **Edit config**, export CSV |
 | **HAProxy** | Six status tiles (service, backends, connections, rates, traffic, version), then every frontend, backend and server with check status, sessions, rates, bytes, 2xx/4xx/5xx | **+ Add** a site or TCP service, **Edit / Delete** any frontend or backend, add/remove servers, server **ready / drain / maint** (kept after a restart), **reload** (config-checked first), restart, logs, **Edit config** |
 | **Alerts** | Active and past alerts: what, when it started, how long it lasted, who acknowledged it | Acknowledge, mute an alert or a whole node, export CSV, check now |
-| **Activity** | Audit log of every change (who, what, result, output) | — |
+| **Activity** | Every change (who, what, result, output), grouped by day | Search, filter by user / result / category / time, hide sign-ins, load more, export CSV |
+| **My account** (every role) | Your profile and signed-in browsers | Change password, preferences (clock, date style, time zone, start page, auto-refresh, **sign out when away**), sign out other browsers |
 | **Settings** | Access (users & sessions, sign-in security), Connections (nodes, Cloudflare accounts), Alerts (notifications, monitoring), System (general, backups, config history, about & updates) — superadmin only | Everything that used to be in config files, plus **updating the dashboard**, **backups**, **monitoring thresholds** |
 
 ### Adding sites and editing HAProxy (no config typing)
@@ -83,6 +86,24 @@ A background checker runs every 30 s (configurable), even with no browser open.
 - **Telegram / Discord** (Settings → Notifications): only new, escalated and resolved alerts are sent, combined into one message per check. Choose the minimum severity and whether to send recoveries for each channel.
 
 ![Alerts](docs/alerts.png)
+
+### My account and signing out when away
+Everyone (viewer, operator, superadmin) has **My account**:
+- change your password;
+- see your signed-in browsers and sign them out;
+- set your preferences: 24-hour or 12-hour clock, date style, time zone, start page and auto-refresh.
+
+**Sign me out when I'm away** (15 min to 8 h) signs you out after that long without a click or key press:
+- you get a one-minute "Stay signed in" warning first;
+- pages refreshing by themselves don't count as being there;
+- the server checks it too, so a tab left open on another computer stays protected.
+
+In Settings → Sign-in security a superadmin can set the longest time anyone may choose. It also applies to users who never chose one.
+
+![My account](docs/account.png)
+
+### Activity
+![Activity](docs/activity.png)
 
 ### Users and roles
 | | Viewer | Operator | Superadmin |
@@ -163,7 +184,7 @@ Host github-gwconsole
   IdentitiesOnly yes
 EOF
 git clone github-gwconsole:ameerdanial/gwconsole.git /root/gwconsole
-cd /root/gwconsole && git checkout v1.4.0      # a tagged release
+cd /root/gwconsole && git checkout v1.4.1      # a tagged release
 ```
 
 ### 2. Run the installer
