@@ -10,12 +10,12 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 // ---------------------------------------------------------------- api
 class AuthError extends Error {}
 async function api(path, opts = {}) {
-  const init = { method: opts.method || "GET", headers: { "X-GWC": "1" }, credentials: "same-origin" };
+  const init = { method: opts.method || "GET", headers: { "X-GWC": "1", "X-GWC-Idle": String(Idle.since()) }, credentials: "same-origin" };
   if (opts.body !== undefined) { init.method = opts.method || "POST"; init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opts.body); }
   const r = await fetch(path, init);
   let j = null;
   try { j = await r.json(); } catch { /* non-json */ }
-  if (r.status === 401 && path !== "/api/login") { showLogin(); throw new AuthError("not logged in"); }
+  if (r.status === 401 && path !== "/api/login") { showLogin(j && j.idle ? `You were ${j.error}. Sign in again.` : ""); throw new AuthError("not logged in"); }
   if (r.status === 403 && j && j.must_change) { forcePasswordChange(); throw new AuthError("password change required"); }
   if (!r.ok) throw new Error((j && j.error) || `HTTP ${r.status}`);
   return j;
@@ -41,8 +41,52 @@ const fmt = {
     if (isNaN(ms)) return esc(t);
     return fmt.dur(Math.max(0, Math.round((Date.now() - ms) / 1000))) + " ago";
   },
-  time: (ts) => (ts ? new Date(ts * 1000).toLocaleString() : "–"),
-  short: (ts) => (ts ? new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "–"),
+  // dates and times follow the signed-in user's preferences (My account → Preferences)
+  _parts(d) {
+    const p = S.prefs || {};
+    const o = { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" };
+    if (p.tz) o.timeZone = p.tz;
+    let parts;
+    try { parts = new Intl.DateTimeFormat("en-GB", o).formatToParts(d); } catch { delete o.timeZone; parts = new Intl.DateTimeFormat("en-GB", o).formatToParts(d); }
+    const g = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+    return { y: +g.year, mo: +g.month, d: +g.day, h: +g.hour % 24, mi: g.minute, s: g.second };
+  },
+  _M: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+  clock(ts, secs = false) {
+    if (!ts) return "–";
+    const x = fmt._parts(new Date(typeof ts === "number" ? ts * 1000 : ts));
+    const t24 = (S.prefs || {}).time24 !== false;
+    const sec = secs ? `:${x.s}` : "";
+    if (t24) return `${String(x.h).padStart(2, "0")}:${x.mi}${sec}`;
+    return `${x.h % 12 || 12}:${x.mi}${sec} ${x.h < 12 ? "AM" : "PM"}`;
+  },
+  date(ts, opts = {}) {
+    if (!ts) return "–";
+    const x = fmt._parts(new Date(typeof ts === "number" ? ts * 1000 : ts));
+    const st = (S.prefs || {}).date_style || "text";
+    const yr = opts.year !== false;
+    const p2 = (n) => String(n).padStart(2, "0");
+    if (st === "iso") return yr ? `${x.y}-${p2(x.mo)}-${p2(x.d)}` : `${p2(x.mo)}-${p2(x.d)}`;
+    if (st === "dmy") return yr ? `${p2(x.d)}/${p2(x.mo)}/${x.y}` : `${p2(x.d)}/${p2(x.mo)}`;
+    return yr ? `${x.d} ${fmt._M[x.mo - 1]} ${x.y}` : `${x.d} ${fmt._M[x.mo - 1]}`;
+  },
+  time: (ts) => (ts ? `${fmt.date(ts)}, ${fmt.clock(ts)}` : "–"),
+  short(ts) {
+    if (!ts) return "–";
+    const same = fmt._parts(new Date(typeof ts === "number" ? ts * 1000 : ts)).y === fmt._parts(new Date()).y;
+    return `${fmt.date(ts, { year: !same })}, ${fmt.clock(ts)}`;
+  },
+  /** "Today" / "Yesterday" / "Mon 3 Nov 2026" heading for a day */
+  day(ts) {
+    const k = (t) => fmt.date(t, {});
+    const now = Date.now() / 1000;
+    if (k(ts) === k(now)) return "Today";
+    if (k(ts) === k(now - 86400)) return "Yesterday";
+    const wd = new Intl.DateTimeFormat("en-GB", { weekday: "short", ...(S.prefs?.tz ? { timeZone: S.prefs.tz } : {}) }).format(new Date(ts * 1000));
+    return `${wd} ${fmt.date(ts)}`;
+  },
+  /** "1 user" / "2 users" */
+  plural: (n, one, many) => `${fmt.n(n)} ${n === 1 ? one : (many || one + "s")}`,
 };
 
 function srvClass(status) {
@@ -96,7 +140,7 @@ function popMenu(anchor, items) {
     m.className = "menu";
     m.innerHTML = items.map((i, k) => i === "-" ? "<hr>" : i.op && !can("operator") ? ""
       : `<button type="button" data-k="${k}" class="${i.cls || ""}">${esc(i.label)}</button>`).join("");
-    const wrap = anchor.closest(".more") || anchor.parentElement;
+    const wrap = anchor.closest(".kebab") || anchor.parentElement;
     wrap.appendChild(m);
     const off = (e) => { if (!m.contains(e.target)) { done(null); } };
     const done = (v) => { m.remove(); document.removeEventListener("mousedown", off, true); resolve(v); };
@@ -187,19 +231,116 @@ function showOutput(title, r) {
 }
 
 // ---------------------------------------------------------------- app state & roles
-const S = { user: null, role: "viewer", page: "overview", params: [], timer: null, inv: null, cache: {}, summaryTimer: null };
+const S = { user: null, role: "viewer", page: "overview", params: [], timer: null, inv: null, cache: {}, summaryTimer: null, prefs: {}, me: null };
 const LEVEL = { viewer: 0, operator: 1, superadmin: 2 };
 const can = (role) => (LEVEL[S.role] ?? -1) >= LEVEL[role];
 
 function setHeader(title, sub = "") { $("#title").textContent = title; $("#subtitle").textContent = sub; }
 function setPulse(state) { const p = $("#pulse"); p.className = "pulse " + (state || ""); }
-function stamp() { $("#updated").textContent = "updated " + new Date().toLocaleTimeString(); }
+function stamp() { $("#updated").textContent = "updated " + fmt.clock(Date.now() / 1000, true); }
 
-function showLogin() {
-  clearTimeout(S.timer); clearInterval(S.summaryTimer);
+function showLogin(msg = "") {
+  clearTimeout(S.timer); clearInterval(S.summaryTimer); Idle.stop(); Idle.hideWarn();
   $("#app").classList.add("hidden");
   $("#login").classList.remove("hidden");
+  $("#loginErr").textContent = msg;
+  $("#loginErr").classList.toggle("info", !!msg);
+  loginFooter();
   $("#loginForm [name=user]").focus();
+}
+
+// ---------------------------------------------------------------- signed out when away (idle)
+/** Tracks the last click/key/touch (shared between tabs), sends it as X-GWC-Idle so auto-refresh doesn't
+ *  count as being there, warns a minute before the user's "sign me out when I'm away" limit and signs out. */
+const Idle = {
+  last: Date.now(), limit: 0, timer: null, warnEl: null,
+  mark() {
+    Idle.last = Date.now();
+    try { localStorage.setItem("gwc-active", String(Idle.last)); } catch { /* private mode */ }
+    if (Idle.warnEl) Idle.hideWarn();
+  },
+  since() {
+    let l = Idle.last;
+    try { l = Math.max(l, +localStorage.getItem("gwc-active") || 0); } catch { /* private mode */ }
+    return Math.max(0, Math.round((Date.now() - l) / 1000));
+  },
+  start(minutes) {
+    Idle.stop();
+    Idle.limit = (minutes || 0) * 60;
+    if (Idle.limit) Idle.timer = setInterval(Idle.tick, 5000);
+  },
+  stop() { clearInterval(Idle.timer); Idle.timer = null; },
+  async tick() {
+    const left = Idle.limit - Idle.since();
+    if (left <= 0) {
+      Idle.stop(); Idle.hideWarn();
+      await api("/api/logout", { body: {} }).catch(() => {});
+      showLogin(`You were signed out after ${fmt.plural(Idle.limit / 60, "minute")} away. Sign in again.`);
+    } else if (left <= 60) Idle.showWarn(left);
+  },
+  showWarn(left) {
+    if (!Idle.warnEl) {
+      Idle.warnEl = document.createElement("div");
+      Idle.warnEl.className = "idlewarn";
+      Idle.warnEl.innerHTML = `<div><b>Still there?</b> <span data-l></span></div>
+        <button class="btn sm pri" data-stay>Stay signed in</button><button class="btn sm" data-out>Sign out</button>`;
+      Idle.warnEl.addEventListener("click", (e) => {
+        if (e.target.closest("[data-stay]")) { Idle.mark(); api("/api/me").catch(() => {}); }
+        if (e.target.closest("[data-out]")) signOut();
+      });
+      document.body.appendChild(Idle.warnEl);
+    }
+    $("[data-l]", Idle.warnEl).textContent = `You'll be signed out in ${left} s because you've been away.`;
+  },
+  hideWarn() { Idle.warnEl?.remove(); Idle.warnEl = null; },
+};
+let _moveT = 0;
+["mousedown", "keydown", "touchstart", "wheel"].forEach((ev) => window.addEventListener(ev, Idle.mark, { passive: true, capture: true }));
+window.addEventListener("mousemove", () => { if (Date.now() - _moveT > 15000) { _moveT = Date.now(); Idle.mark(); } }, { passive: true });
+
+async function signOut() {
+  await api("/api/logout", { body: {} }).catch(() => {});
+  showLogin();
+}
+
+// ---------------------------------------------------------------- user card, menu, footer
+function initials(name) {
+  const p = String(name || "?").split(/[^A-Za-z0-9]+/).filter(Boolean);
+  return ((p[0] || "?")[0] + (p[1] ? p[1][0] : (p[0] || "").slice(1, 2))).toUpperCase();
+}
+function renderUser(me) {
+  $("#uav").textContent = initials(me.user);
+  $("#who").textContent = me.user;
+  $("#whoRole").textContent = me.role;
+  $("#whoRole").className = `rolepill ${me.role}`;
+  $("#umName").textContent = me.user;
+  $("#umSub").textContent = `${me.role[0].toUpperCase() + me.role.slice(1)}${me.idle_limit ? ` · signed out after ${me.idle_limit} min away` : ""}`;
+  $("#umNew").innerHTML = `<i>✦</i>What's new in v${esc(me.version)}`;
+}
+function toggleUserMenu(open) {
+  const m = $("#umenu");
+  const on = open ?? m.classList.contains("hidden");
+  m.classList.toggle("hidden", !on);
+  $("#ucard").classList.toggle("open", on);
+}
+function footerHtml(version, upd) {
+  const year = new Date().getFullYear();
+  const status = upd === undefined ? "" : upd ? `<a href="#/settings/about" class="updlink">${esc(upd)} available</a><span class="sep">·</span>`
+    : `<span class="ok">✓ up to date</span><span class="sep">·</span>`;
+  return `<span class="brand3">GW<b>//</b>CONSOLE</span><span>v${esc(version || "")}</span><span class="sep">·</span>${status}<a href="#" data-notes>Release notes</a>
+    <span class="grow"></span><span>© ${year} <a href="https://adproject.fun" target="_blank" rel="noopener">ADProject</a>. All rights reserved.</span>`;
+}
+function renderFooter(upd) { $("#pfoot").innerHTML = footerHtml(S.me?.version, upd); }
+async function showWhatsNew() {
+  if (can("superadmin")) { location.hash = "#/settings/about"; return; }
+  const d = await api("/api/system");
+  modal({ title: `What's new in v${d.version}`, size: "lg", body: `<div class="md">${mdLite((d.whatsnew || "").replace(/^## .*\n?/, "")) || "No notes."}</div>`, actions: [{ label: "Close", value: true }] });
+}
+async function loginFooter() {
+  try {
+    const h = await fetch("/api/health").then((r) => r.json());
+    $("#loginFoot").innerHTML = `GW//CONSOLE v${esc(h.version)} · © ${new Date().getFullYear()} <a href="https://adproject.fun" target="_blank" rel="noopener">ADProject</a>. All rights reserved.`;
+  } catch { /* offline */ }
 }
 
 async function boot() {
@@ -207,11 +348,13 @@ async function boot() {
   try {
     me = await api("/api/me");
   } catch (e) { if (!(e instanceof AuthError)) toast(e.message, "bad"); return; }
-  S.user = me.user; S.role = me.role;
+  S.user = me.user; S.role = me.role; S.me = me; S.prefs = me.prefs || {};
   document.body.dataset.role = me.role;
-  $("#who").textContent = S.user;
-  $("#whoRole").textContent = me.role;
-  $("#ver").textContent = me.version ? `v${me.version}` : "";
+  renderUser(me);
+  renderFooter();
+  $("#auto").checked = S.prefs.auto_refresh !== false;
+  Idle.mark();
+  Idle.start(me.idle_limit);
   $("#navSettings").classList.toggle("hidden", !can("superadmin"));
   $("#login").classList.add("hidden");
   $("#app").classList.remove("hidden");
@@ -219,10 +362,10 @@ async function boot() {
   S.inv = await api("/api/inventory");
   updateBanner(me.updated);
   if (can("superadmin")) api("/api/system").then((d) => {
-    const u = d.update || {};
-    const has = u.latest && u.current && u.latest !== u.current && (u.available || []).length;
-    $("#ver").innerHTML = `v${esc(me.version)}${has ? ` · <a href="#/settings/about" class="updlink" title="Update available">${esc(u.latest)} available</a>` : ""}`;
+    const av = (d.update || {}).available || [];
+    renderFooter(av.length ? av[0].version : null);
   }).catch(() => {});
+  if (!location.hash && S.prefs.start_page && S.prefs.start_page !== "overview") history.replaceState(null, "", `#/${S.prefs.start_page}`);
   // fresh install: walk the superadmin through nodes → Cloudflare → alerts (no extra hashchange)
   if (me.setup && !/^#\/setup/.test(location.hash)) history.replaceState(null, "", "#/setup");
   route();
@@ -241,8 +384,17 @@ $("#loginForm").addEventListener("submit", async (e) => {
     boot();
   } catch (err) { $("#loginErr").textContent = err.message; }
 });
-$("#logout").addEventListener("click", async () => { await api("/api/logout", { body: {} }).catch(() => {}); showLogin(); });
-$("#account").addEventListener("click", () => changePassword(false));
+$("#logout").addEventListener("click", (e) => { e.preventDefault(); toggleUserMenu(false); signOut(); });
+$("#ubtn").addEventListener("click", (e) => { e.stopPropagation(); toggleUserMenu(); });
+$("#umenu").addEventListener("click", (e) => {
+  if (e.target.closest("#umNew")) { e.preventDefault(); showWhatsNew(); }
+  if (e.target.closest("a")) toggleUserMenu(false);
+});
+document.addEventListener("click", (e) => { if (!e.target.closest("#ucard")) toggleUserMenu(false); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") toggleUserMenu(false); });
+$("#hamb").addEventListener("click", () => $("#side").classList.toggle("open"));
+$("#nav").addEventListener("click", (e) => { if (e.target.closest("a")) $("#side").classList.remove("open"); });
+$("#pfoot").addEventListener("click", (e) => { if (e.target.closest("[data-notes]")) { e.preventDefault(); showWhatsNew(); } });
 $("#refresh").addEventListener("click", () => refresh(true));
 $("#auto").addEventListener("change", () => schedule());
 
