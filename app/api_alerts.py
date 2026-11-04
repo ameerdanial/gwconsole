@@ -9,9 +9,10 @@ import time
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import Response
 
+from . import sites
 from .alerts import FLAP_QUIET, is_muted
 from .config import NAME_RE
-from .state import audit, need, st, user
+from .state import audit, need, scope, st, user
 
 router = APIRouter(prefix="/api")
 SEVS = ("warn", "crit")
@@ -61,14 +62,23 @@ def _query(state: str, sev: str, q: str, days: int, limit: int) -> list[dict]:
     return _decorate(st.store.db.q(sql, (*args, max(1, min(limit, 5000)))), t)
 
 
+async def _mine(request: Request, rows: list[dict]) -> list[dict]:
+    """Scoped users only see alerts about their own sites, tunnels and backends."""
+    sc = scope(request)
+    if sc.all:
+        return rows
+    await sites.prime_scope(sc)
+    return [a for a in rows if sc.text_ok(a.get("where", ""))]
+
+
 @router.get("/alerts")
-async def list_alerts(state: str = "active", sev: str = "", q: str = "", days: int = 7, limit: int = 500):
-    return {"items": _query(state, sev, q.strip()[:100], days, limit)}
+async def list_alerts(request: Request, state: str = "active", sev: str = "", q: str = "", days: int = 7, limit: int = 500):
+    return {"items": await _mine(request, _query(state, sev, q.strip()[:100], days, limit))}
 
 
 @router.get("/alerts/summary")
-async def summary():
-    act = active_alerts()
+async def summary(request: Request):
+    act = await _mine(request, active_alerts())
     live = [a for a in act if not a["muted"]]
     return {"active": len(act), "unacked": sum(1 for a in live if not a["acked_by"]),
             "crit": sum(1 for a in live if a["sev"] == "crit" and not a["acked_by"]),
@@ -80,6 +90,7 @@ async def drift_accept(request: Request, body: dict = Body(...)):
     """'Accept change' on a changed-outside-the-dashboard alert."""
     from . import history
     need(request, "operator")
+    scope(request).need_all("Accepting a config change made outside the dashboard")
     where = str(body.get("where", ""))
     history.accept(st, where)
     audit(request, "config change accepted", where, True, "changed outside the dashboard; accepted as the known version")
@@ -90,7 +101,7 @@ async def drift_accept(request: Request, body: dict = Body(...)):
 async def ack(request: Request, aid: int, body: dict = Body(default={})):
     need(request, "operator")
     row = st.store.db.one("SELECT * FROM alerts WHERE id=?", (aid,))
-    if not row:
+    if not row or not await _mine(request, [{"where": row["target"]}]):
         raise KeyError("alert not found")
     if body.get("ack", True):
         st.store.db.x("UPDATE alerts SET acked_by=?, acked_at=? WHERE id=?", (user(request)["username"], int(time.time()), aid))
@@ -107,8 +118,8 @@ async def check_now(request: Request):
 
 
 @router.get("/alerts/export.csv")
-async def export(state: str = "history", sev: str = "", q: str = "", days: int = 30):
-    rows = _query(state, sev, q.strip()[:100], days, 5000)
+async def export(request: Request, state: str = "history", sev: str = "", q: str = "", days: int = 30):
+    rows = await _mine(request, _query(state, sev, q.strip()[:100], days, 5000))
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["id", "severity", "status", "target", "message", "started", "resolved", "duration_s", "flaps",
@@ -127,9 +138,19 @@ async def export(state: str = "history", sev: str = "", q: str = "", days: int =
 
 
 # ---- mutes ----------------------------------------------------------------------
+async def _mute_ok(request: Request, match: str) -> bool:
+    sc = scope(request)
+    if sc.all:
+        return True
+    if match.startswith("node:"):
+        return False
+    row = st.store.db.one("SELECT target FROM alerts WHERE key=? ORDER BY id DESC LIMIT 1", (match,))
+    return bool(row) and bool(await _mine(request, [{"where": row["target"]}]))
+
+
 @router.get("/mutes")
-async def mutes():
-    return {"items": st.engine.mutes()}
+async def mutes(request: Request):
+    return {"items": [m for m in st.engine.mutes() if await _mute_ok(request, m.get("match", ""))]}
 
 
 @router.post("/mutes")
@@ -144,6 +165,9 @@ async def add_mute(request: Request, body: dict = Body(...)):
             raise ValueError("bad node name")
     elif not st.store.db.one("SELECT 1 FROM alerts WHERE key=?", (match,)) or not re.match(r"^[\w.]+\|", match):
         raise ValueError("unknown alert")
+    if not await _mute_ok(request, match):
+        from .scope import ScopeError
+        raise ScopeError("you can only mute alerts about your own sites, tunnels and backends")
     t = int(time.time())
     reason = str(body.get("reason") or "")[:200]
     mid = st.store.db.x("INSERT INTO mutes (match, until, reason, created_by, created_at) VALUES (?,?,?,?,?)",
@@ -156,7 +180,7 @@ async def add_mute(request: Request, body: dict = Body(...)):
 async def del_mute(request: Request, mid: int):
     need(request, "operator")
     row = st.store.db.one("SELECT * FROM mutes WHERE id=?", (mid,))
-    if not row:
+    if not row or not await _mute_ok(request, row["match"]):
         raise KeyError("mute not found")
     st.store.db.x("DELETE FROM mutes WHERE id=?", (mid,))
     audit(request, "unmute", row["match"], True)
